@@ -171,8 +171,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     break;
                 case IDC_BTN_QUERY_MARKET:
                     if (g_pTrader && IsLoggedIn(g_pTrader)) {
-                        UpdateStatus("正在查询行情...");
-                        QueryMarketData(g_pTrader, "");
+                        UpdateStatus("提示: 行情查询需要指定合约，请先查询合约列表");
+                        MessageBox(g_hMainWnd, 
+                                 TEXT("行情查询需要指定合约代码。\n\n建议操作:\n1. 先点击\"查询合约\"获取合约列表\n2. 记下感兴趣的合约代码（如 cu2604）\n3. 当前版本暂不支持行情查询\n\n如需查询行情，请修改代码指定合约代码。"), 
+                                 TEXT("提示"), 
+                                 MB_ICONINFORMATION | MB_OK);
                     } else {
                         UpdateStatus("错误: 请先连接登录");
                     }

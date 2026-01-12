@@ -150,7 +150,8 @@ void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoFie
         return;
     }
     static int row = 0;
-    if (requestID != nRequestID) {
+    static int lastRequestID = 0;
+    if (lastRequestID != nRequestID) {
         ClearListView();
         AddColumn(0, "Time", 90);
         AddColumn(1, "Instrument", 100);
@@ -162,6 +163,7 @@ void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoFie
         AddColumn(7, "Status", 100);
         AddColumn(8, "Remark", 150);
         row = 0;
+        lastRequestID = nRequestID;
     }
     if (pOrder) {
         char buf[256];
@@ -199,7 +201,8 @@ void TraderSpi::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInves
         return;
     }
     static int row = 0;
-    if (requestID != nRequestID) {
+    static int lastRequestID = 0;
+    if (lastRequestID != nRequestID) {
         ClearListView();
         AddColumn(0, "Instrument", 100);
         AddColumn(1, "Direction", 60);
@@ -211,6 +214,7 @@ void TraderSpi::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInves
         AddColumn(7, "Profit", 100);
         AddColumn(8, "TodayProfit", 100);
         row = 0;
+        lastRequestID = nRequestID;
     }
     if (pInvestorPosition) {
         char buf[256];
@@ -249,7 +253,8 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
         return;
     }
     static int row = 0;
-    if (requestID != nRequestID) {
+    static int lastRequestID = 0;
+    if (lastRequestID != nRequestID) {
         ClearListView();
         AddColumn(0, "Instrument", 100);
         AddColumn(1, "LastPrice", 80);
@@ -262,6 +267,7 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
         AddColumn(8, "Change", 80);
         AddColumn(9, "Change%", 80);
         row = 0;
+        lastRequestID = nRequestID;
     }
     if (pDepthMarketData) {
         char buf[256];
@@ -301,7 +307,11 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
         return;
     }
     static int row = 0;
-    if (requestID != nRequestID) {
+    static int totalCount = 0;
+    static int lastRequestID = 0;
+    const int MAX_DISPLAY = 500;  // 最多显示500条，防止界面卡死
+    
+    if (lastRequestID != nRequestID) {
         ClearListView();
         AddColumn(0, "InstrumentID", 100);
         AddColumn(1, "Name", 150);
@@ -312,24 +322,34 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
         AddColumn(6, "ExpireDate", 100);
         AddColumn(7, "OpenDate", 100);
         row = 0;
+        totalCount = 0;
+        lastRequestID = nRequestID;
     }
     if (pInstrument) {
-        char buf[256];
-        AddItem(row, 0, pInstrument->InstrumentID);
-        AddItem(row, 1, pInstrument->InstrumentName);
-        AddItem(row, 2, pInstrument->ExchangeID);
-        AddItem(row, 3, pInstrument->ProductID);
-        sprintf(buf, "%d", pInstrument->VolumeMultiple);
-        AddItem(row, 4, buf);
-        sprintf(buf, "%.4f", pInstrument->PriceTick);
-        AddItem(row, 5, buf);
-        AddItem(row, 6, pInstrument->ExpireDate);
-        AddItem(row, 7, pInstrument->OpenDate);
-        row++;
+        totalCount++;
+        // 只显示前500条，避免界面卡死
+        if (row < MAX_DISPLAY) {
+            char buf[256];
+            AddItem(row, 0, pInstrument->InstrumentID);
+            AddItem(row, 1, pInstrument->InstrumentName);
+            AddItem(row, 2, pInstrument->ExchangeID);
+            AddItem(row, 3, pInstrument->ProductID);
+            sprintf(buf, "%d", pInstrument->VolumeMultiple);
+            AddItem(row, 4, buf);
+            sprintf(buf, "%.4f", pInstrument->PriceTick);
+            AddItem(row, 5, buf);
+            AddItem(row, 6, pInstrument->ExpireDate);
+            AddItem(row, 7, pInstrument->OpenDate);
+            row++;
+        }
     }
     if (bIsLast) {
-        char msg[128];
-        sprintf(msg, "Query instrument complete, count: %d", row);
+        char msg[256];
+        if (totalCount > MAX_DISPLAY) {
+            sprintf(msg, "Query instrument complete, total: %d, displayed: %d (limited)", totalCount, MAX_DISPLAY);
+        } else {
+            sprintf(msg, "Query instrument complete, count: %d", totalCount);
+        }
         UpdateStatus(msg);
     }
 }
