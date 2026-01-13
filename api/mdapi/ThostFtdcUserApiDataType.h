@@ -2648,13 +2648,13 @@ typedef char TThostFtdcVirementAvailAbilityType;
 ///TFtdcVirementTradeCodeType是一个交易代码类型
 /////////////////////////////////////////////////////////////////////////
 ///银行发起银行资金转期货
-#define THOST_FTDC_VTC_BankBankToFuture '1'
+#define THOST_FTDC_VTC_BankBankToFuture '102001'
 ///银行发起期货资金转银行
-#define THOST_FTDC_VTC_BankFutureToBank '2'
+#define THOST_FTDC_VTC_BankFutureToBank '102002'
 ///期货发起银行资金转期货
-#define THOST_FTDC_VTC_FutureBankToFuture '3'
+#define THOST_FTDC_VTC_FutureBankToFuture '202001'
 ///期货发起期货资金转银行
-#define THOST_FTDC_VTC_FutureFutureToBank '4'
+#define THOST_FTDC_VTC_FutureFutureToBank '202002'
 
 typedef char TThostFtdcVirementTradeCodeType;
 
@@ -4539,13 +4539,13 @@ typedef char TThostFtdcMonthBillTradeSumType;
 ///TFtdcFBTTradeCodeEnumType是一个银期交易代码枚举类型
 /////////////////////////////////////////////////////////////////////////
 ///银行发起银行转期货
-#define THOST_FTDC_FTC_BankLaunchBankToBroker '1'
+#define THOST_FTDC_FTC_BankLaunchBankToBroker '102001'
 ///期货发起银行转期货
-#define THOST_FTDC_FTC_BrokerLaunchBankToBroker '2'
+#define THOST_FTDC_FTC_BrokerLaunchBankToBroker '202001'
 ///银行发起期货转银行
-#define THOST_FTDC_FTC_BankLaunchBrokerToBank '3'
+#define THOST_FTDC_FTC_BankLaunchBrokerToBank '102002'
 ///期货发起期货转银行
-#define THOST_FTDC_FTC_BrokerLaunchBrokerToBank '4'
+#define THOST_FTDC_FTC_BrokerLaunchBrokerToBank '202002'
 
 typedef char TThostFtdcFBTTradeCodeEnumType;
 
@@ -6574,43 +6574,6 @@ typedef char TThostFtdcRULEInstrClassType;
 #define THOST_FTDC_SELFTRADE_AvoidSelfTradeCheck '1'
 
 typedef char TThostFtdcOrderFlagType[21];
-
-/////////////////////////////////////////////////////////////////////////
-///TThostFtdcOperateType是一个业务操作类型
-///代表针对风控禁止权限的操作。暂不开放：'2'修改
-/////////////////////////////////////////////////////////////////////////
-typedef char TThostFtdcOperateType;
-// 新增
-#define THOST_FTDC_RIGHT_ADD '1'
-// // 修改
-// #define THOST_FTDC_RIGHT_MODDIFY '2'
-// 删除
-#define THOST_FTDC_RIGHT_REMOVE '3'
-
-/////////////////////////////////////////////////////////////////////////
-///TFtdcOffsetTypeType是一个对冲类型类型
-/////////////////////////////////////////////////////////////////////////
-///期权对冲
-#define THOST_FTDC_OT_OPT_OFFSET '0'
-///期货对冲
-#define THOST_FTDC_OT_FUT_OFFSET '1'
-///行权后期货对冲
-#define THOST_FTDC_OT_EXEC_OFFSET '2'
-///履约后期货对冲
-#define THOST_FTDC_OT_PERFORM_OFFSET '3'
-
-typedef char TThostFtdcOffsetTypeType;
-
-/////////////////////////////////////////////////////////////////////////
-///TFtdcApplySrcType是一个申请来源类型
-/////////////////////////////////////////////////////////////////////////
-///交易
-#define THOST_FTDC_AS_Trade '0'
-///会服
-#define THOST_FTDC_AS_Member '1'
-
-typedef char TThostFtdcApplySrcType;
-
 
 /////////////////////////////////////////////////////////////////////////
 

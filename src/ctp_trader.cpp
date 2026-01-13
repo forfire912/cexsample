@@ -1,6 +1,7 @@
 // CTP Trading API Wrapper
 #include "ctp_trader.h"
 #include "../api/traderapi/ThostFtdcTraderApi.h"
+#include "../api/mdapi/ThostFtdcMdApi.h"
 #include <stdio.h>
 #include <string.h>
 #include <commctrl.h>
@@ -45,6 +46,10 @@ public:
         memset(password, 0, sizeof(password));
         memset(authCode, 0, sizeof(authCode));
         memset(appID, 0, sizeof(appID));
+    }
+    
+    virtual ~TraderSpi() {
+        // 析构函数
     }
     
     void UpdateStatus(const char* msg) {
@@ -140,6 +145,199 @@ public:
     virtual void OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInvestorPosition, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast);
     virtual void OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMarketData, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast);
     virtual void OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast);
+};
+
+// 行情SPI类
+class MdSpi : public CThostFtdcMdSpi {
+public:
+    CThostFtdcMdApi* pMdApi;
+    HWND hListView;
+    StatusCallback statusCallback;
+    char brokerID[11];
+    char userID[16];
+    char password[41];
+    int requestID;
+    bool isConnected;
+    bool isLoggedIn;
+    
+    MdSpi() {
+        pMdApi = NULL;
+        hListView = NULL;
+        statusCallback = NULL;
+        requestID = 0;
+        isConnected = false;
+        isLoggedIn = false;
+        memset(brokerID, 0, sizeof(brokerID));
+        memset(userID, 0, sizeof(userID));
+        memset(password, 0, sizeof(password));
+    }
+    
+    virtual ~MdSpi() {
+        // 析构函数
+    }
+    
+    void UpdateStatus(const char* msg) {
+        if (statusCallback) {
+            statusCallback(msg);
+        }
+    }
+    
+    void ClearListView() {
+        if (hListView) {
+            ListView_DeleteAllItems(hListView);
+            int colCount = Header_GetItemCount(ListView_GetHeader(hListView));
+            for (int i = colCount - 1; i >= 0; i--) {
+                ListView_DeleteColumn(hListView, i);
+            }
+        }
+    }
+    
+    void AddColumn(int col, const char* text, int width) {
+        if (!hListView) return;
+        LVCOLUMN lvc = {0};
+        lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
+        lvc.fmt = LVCFMT_LEFT;
+        lvc.cx = width;
+        lvc.pszText = (LPSTR)text;
+        ListView_InsertColumn(hListView, col, &lvc);
+    }
+    
+    void AddItem(int row, int col, const char* text) {
+        if (!hListView) return;
+        if (col == 0) {
+            LVITEM lvi = {0};
+            lvi.mask = LVIF_TEXT;
+            lvi.iItem = row;
+            lvi.iSubItem = 0;
+            lvi.pszText = (LPSTR)text;
+            ListView_InsertItem(hListView, &lvi);
+        } else {
+            ListView_SetItemText(hListView, row, col, (LPSTR)text);
+        }
+    }
+    
+    virtual void OnFrontConnected() {
+        LogMessage("MD OnFrontConnected");
+        isConnected = true;
+        UpdateStatus("行情服务器已连接，正在登录...");
+        
+        CThostFtdcReqUserLoginField req = {0};
+        strcpy(req.BrokerID, brokerID);
+        strcpy(req.UserID, userID);
+        strcpy(req.Password, password);
+        
+        int ret = pMdApi->ReqUserLogin(&req, ++requestID);
+        if (ret != 0) {
+            char msg[128];
+            sprintf(msg, "发送行情登录请求失败: %d", ret);
+            UpdateStatus(msg);
+        }
+    }
+    
+    virtual void OnFrontDisconnected(int nReason) {
+        LogMessage("MD OnFrontDisconnected");
+        isConnected = false;
+        isLoggedIn = false;
+        char msg[128];
+        sprintf(msg, "行情服务器连接断开: %d", nReason);
+        UpdateStatus(msg);
+    }
+    
+    virtual void OnRspUserLogin(CThostFtdcRspUserLoginField *pRspUserLogin, 
+                                CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
+        if (pRspInfo && pRspInfo->ErrorID != 0) {
+            char msg[256];
+            sprintf(msg, "行情登录失败: %s", pRspInfo->ErrorMsg);
+            UpdateStatus(msg);
+            return;
+        }
+        isLoggedIn = true;
+        UpdateStatus("行情登录成功！可以订阅行情了");
+        LogMessage("MD Login success");
+    }
+    
+    virtual void OnRspSubMarketData(CThostFtdcSpecificInstrumentField *pSpecificInstrument, 
+                                    CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
+        if (pRspInfo && pRspInfo->ErrorID != 0) {
+            char msg[256];
+            sprintf(msg, "订阅行情失败: %s", pRspInfo->ErrorMsg);
+            UpdateStatus(msg);
+        } else if (pSpecificInstrument) {
+            char msg[256];
+            sprintf(msg, "订阅行情成功: %s", pSpecificInstrument->InstrumentID);
+            UpdateStatus(msg);
+        }
+    }
+    
+    virtual void OnRspUnSubMarketData(CThostFtdcSpecificInstrumentField *pSpecificInstrument, 
+                                      CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
+        if (pRspInfo && pRspInfo->ErrorID != 0) {
+            char msg[256];
+            sprintf(msg, "取消订阅失败: %s", pRspInfo->ErrorMsg);
+            UpdateStatus(msg);
+        } else if (pSpecificInstrument) {
+            char msg[256];
+            sprintf(msg, "取消订阅成功: %s", pSpecificInstrument->InstrumentID);
+            UpdateStatus(msg);
+        }
+    }
+    
+    virtual void OnRtnDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMarketData) {
+        if (!pDepthMarketData) return;
+        
+        // 清空列表并设置列
+        ClearListView();
+        AddColumn(0, "Instrument", 100);
+        AddColumn(1, "LastPrice", 80);
+        AddColumn(2, "PreClose", 80);
+        AddColumn(3, "Open", 80);
+        AddColumn(4, "High", 80);
+        AddColumn(5, "Low", 80);
+        AddColumn(6, "Volume", 80);
+        AddColumn(7, "OpenInt", 80);
+        AddColumn(8, "Change", 80);
+        AddColumn(9, "Change%", 80);
+        AddColumn(10, "UpdateTime", 100);
+        
+        char buf[256];
+        AddItem(0, 0, pDepthMarketData->InstrumentID);
+        
+        sprintf(buf, "%.2f", pDepthMarketData->LastPrice);
+        AddItem(0, 1, buf);
+        
+        sprintf(buf, "%.2f", pDepthMarketData->PreClosePrice);
+        AddItem(0, 2, buf);
+        
+        sprintf(buf, "%.2f", pDepthMarketData->OpenPrice);
+        AddItem(0, 3, buf);
+        
+        sprintf(buf, "%.2f", pDepthMarketData->HighestPrice);
+        AddItem(0, 4, buf);
+        
+        sprintf(buf, "%.2f", pDepthMarketData->LowestPrice);
+        AddItem(0, 5, buf);
+        
+        sprintf(buf, "%d", pDepthMarketData->Volume);
+        AddItem(0, 6, buf);
+        
+        sprintf(buf, "%.0f", pDepthMarketData->OpenInterest);
+        AddItem(0, 7, buf);
+        
+        double change = pDepthMarketData->LastPrice - pDepthMarketData->PreClosePrice;
+        sprintf(buf, "%.2f", change);
+        AddItem(0, 8, buf);
+        
+        double changePercent = pDepthMarketData->PreClosePrice > 0 ? 
+                               (change / pDepthMarketData->PreClosePrice * 100) : 0;
+        sprintf(buf, "%.2f%%", changePercent);
+        AddItem(0, 9, buf);
+        
+        sprintf(buf, "%s", pDepthMarketData->UpdateTime);
+        AddItem(0, 10, buf);
+        
+        sprintf(buf, "实时行情: %s %.2f", pDepthMarketData->InstrumentID, pDepthMarketData->LastPrice);
+        UpdateStatus(buf);
+    }
 };
 
 void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
@@ -356,11 +554,32 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
 
 struct CTPTrader {
     TraderSpi* pSpi;
+    MdSpi* pMdSpi;
 };
 
 extern "C" CTPTrader* CreateCTPTrader() {
-    CTPTrader* trader = new CTPTrader();
-    trader->pSpi = new TraderSpi();
+    LogMessage("CreateCTPTrader called");
+    CTPTrader* trader = NULL;
+    try {
+        trader = new CTPTrader();
+        LogMessage("CTPTrader struct allocated");
+        
+        trader->pSpi = new TraderSpi();
+        LogMessage("TraderSpi created");
+        
+        trader->pMdSpi = new MdSpi();
+        LogMessage("MdSpi created");
+        
+        LogMessage("CreateCTPTrader completed successfully");
+    } catch (...) {
+        LogMessage("ERROR: Exception in CreateCTPTrader");
+        if (trader) {
+            if (trader->pSpi) delete trader->pSpi;
+            if (trader->pMdSpi) delete trader->pMdSpi;
+            delete trader;
+        }
+        return NULL;
+    }
     return trader;
 }
 
@@ -371,17 +590,25 @@ extern "C" void DestroyCTPTrader(CTPTrader* trader) {
             trader->pSpi->pUserApi->Release();
             trader->pSpi->pUserApi = NULL;
         }
+        if (trader->pMdSpi && trader->pMdSpi->pMdApi) {
+            trader->pMdSpi->pMdApi->RegisterSpi(NULL);
+            trader->pMdSpi->pMdApi->Release();
+            trader->pMdSpi->pMdApi = NULL;
+        }
         if (trader->pSpi) { delete trader->pSpi; }
+        if (trader->pMdSpi) { delete trader->pMdSpi; }
         delete trader;
     }
 }
 
 extern "C" void SetListView(CTPTrader* trader, HWND hListView) {
     if (trader && trader->pSpi) { trader->pSpi->hListView = hListView; }
+    if (trader && trader->pMdSpi) { trader->pMdSpi->hListView = hListView; }
 }
 
 extern "C" void SetStatusCallback(CTPTrader* trader, StatusCallback callback) {
     if (trader && trader->pSpi) { trader->pSpi->statusCallback = callback; }
+    if (trader && trader->pMdSpi) { trader->pMdSpi->statusCallback = callback; }
 }
 
 extern "C" int ConnectAndLogin(CTPTrader* trader, const char* brokerID, const char* userID, const char* password, const char* frontAddr, const char* authCode, const char* appID) {
@@ -426,14 +653,42 @@ extern "C" int ConnectAndLogin(CTPTrader* trader, const char* brokerID, const ch
         pSpi->pUserApi->RegisterSpi(pSpi);
         LogMessage("SPI registered");
         
-        pSpi->pUserApi->SubscribePublicTopic(THOST_TERT_QUICK);
-        pSpi->pUserApi->SubscribePrivateTopic(THOST_TERT_QUICK);
+        try {
+            pSpi->pUserApi->SubscribePublicTopic(THOST_TERT_QUICK);
+            LogMessage("SubscribePublicTopic called");
+        } catch (...) {
+            LogMessage("ERROR: SubscribePublicTopic threw exception");
+            throw;
+        }
+        
+        try {
+            pSpi->pUserApi->SubscribePrivateTopic(THOST_TERT_QUICK);
+            LogMessage("SubscribePrivateTopic called");
+        } catch (...) {
+            LogMessage("ERROR: SubscribePrivateTopic threw exception");
+            throw;
+        }
+        
         LogMessage("Topics subscribed");
         
-        pSpi->pUserApi->RegisterFront((char*)frontAddr);
+        try {
+            pSpi->pUserApi->RegisterFront((char*)frontAddr);
+            LogMessage("RegisterFront called");
+        } catch (...) {
+            LogMessage("ERROR: RegisterFront threw exception");
+            throw;
+        }
+        
         LogMessage("Front registered");
         
-        pSpi->pUserApi->Init();
+        try {
+            pSpi->pUserApi->Init();
+            LogMessage("Init called");
+        } catch (...) {
+            LogMessage("ERROR: Init threw exception");
+            throw;
+        }
+        
         LogMessage("API Init called - waiting for connection...");
         
         pSpi->UpdateStatus("API initialized, connecting...");
@@ -484,4 +739,74 @@ extern "C" int QueryInstrument(CTPTrader* trader, const char* instrumentID) {
     if (instrumentID && strlen(instrumentID) > 0) { strcpy(req.InstrumentID, instrumentID); }
     Sleep(1000);
     return trader->pSpi->pUserApi->ReqQryInstrument(&req, ++trader->pSpi->requestID);
+}
+
+// 行情API相关函数
+extern "C" int ConnectMarketData(CTPTrader* trader, const char* brokerID, const char* userID, 
+                                  const char* password, const char* mdFrontAddr) {
+    if (!trader || !trader->pMdSpi) return -1;
+    
+    LogMessage("ConnectMarketData called");
+    
+    // 保存认证信息
+    strcpy(trader->pMdSpi->brokerID, brokerID);
+    strcpy(trader->pMdSpi->userID, userID);
+    strcpy(trader->pMdSpi->password, password);
+    
+    // 创建行情API
+    trader->pMdSpi->pMdApi = CThostFtdcMdApi::CreateFtdcMdApi("flow\\", false, false);
+    if (!trader->pMdSpi->pMdApi) {
+        LogMessage("Failed to create MdApi");
+        return -1;
+    }
+    
+    LogMessage("MdApi created");
+    
+    // 注册SPI
+    trader->pMdSpi->pMdApi->RegisterSpi(trader->pMdSpi);
+    
+    // 注册行情前置
+    char frontAddr[256];
+    strcpy(frontAddr, mdFrontAddr);
+    trader->pMdSpi->pMdApi->RegisterFront(frontAddr);
+    
+    char msg[256];
+    sprintf(msg, "MD Front registered: %s", mdFrontAddr);
+    LogMessage(msg);
+    
+    // 初始化API
+    trader->pMdSpi->pMdApi->Init();
+    LogMessage("MdApi Init called");
+    
+    return 0;
+}
+
+extern "C" int SubscribeMarketData(CTPTrader* trader, const char* instrumentID) {
+    if (!trader || !trader->pMdSpi || !trader->pMdSpi->pMdApi) return -1;
+    if (!trader->pMdSpi->isLoggedIn) return -2;
+    
+    char* ppInstrumentID[1];
+    ppInstrumentID[0] = const_cast<char*>(instrumentID);
+    
+    int ret = trader->pMdSpi->pMdApi->SubscribeMarketData(ppInstrumentID, 1);
+    
+    char msg[256];
+    sprintf(msg, "SubscribeMarketData: %s, ret=%d", instrumentID, ret);
+    LogMessage(msg);
+    
+    return ret;
+}
+
+extern "C" int UnsubscribeMarketData(CTPTrader* trader, const char* instrumentID) {
+    if (!trader || !trader->pMdSpi || !trader->pMdSpi->pMdApi) return -1;
+    
+    char* ppInstrumentID[1];
+    ppInstrumentID[0] = const_cast<char*>(instrumentID);
+    
+    return trader->pMdSpi->pMdApi->UnSubscribeMarketData(ppInstrumentID, 1);
+}
+
+extern "C" int IsMarketDataConnected(CTPTrader* trader) {
+    if (!trader || !trader->pMdSpi) return 0;
+    return trader->pMdSpi->isLoggedIn ? 1 : 0;
 }

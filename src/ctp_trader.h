@@ -36,6 +36,13 @@ int QueryPositions(CTPTrader* trader);
 int QueryMarketData(CTPTrader* trader, const char* instrumentID);
 int QueryInstrument(CTPTrader* trader, const char* instrumentID);
 
+// 行情订阅功能（使用MdApi）
+int ConnectMarketData(CTPTrader* trader, const char* brokerID, const char* userID, 
+                      const char* password, const char* mdFrontAddr);
+int SubscribeMarketData(CTPTrader* trader, const char* instrumentID);
+int UnsubscribeMarketData(CTPTrader* trader, const char* instrumentID);
+int IsMarketDataConnected(CTPTrader* trader);
+
 #ifdef __cplusplus
 }
 #endif
