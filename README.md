@@ -1,163 +1,167 @@
-# CTP Trading System
+# CTP 期货交易系统
 
-A Windows GUI application for CTP (Comprehensive Transaction Platform) trading operations.
+基于 CTP API 的 Windows GUI 期货交易应用程序，支持交易和实时行情订阅功能。
 
-## ⚠️ Important: Antivirus False Positive Warning
+## 快速开始
 
-**Windows Defender or other antivirus software may delete the compiled `CTP_Trader.exe` as a false positive.**
-
-### Quick Fix:
-1. **Add exclusion** to Windows Defender:
-   - Run as Administrator: `.\add_exclusion.ps1`
-   - Or manually add folder: `D:\projects\other\cexsample\bin`
-   
-2. **Recompile**: `.\build.ps1`
-
-3. **Run**: `.\run.bat`
-
-📖 **See [ANTIVIRUS_SOLUTION.md](ANTIVIRUS_SOLUTION.md) for detailed solutions.**
-
----
-
-## Project Structure
-
-```
-cexsample/
-├── api/                      # CTP C API libraries and headers
-│   ├── doc/                 # API documentation (PDF)
-│   └── traderapi/           # Header files and static libraries
-│       ├── *.h              # C/C++ header files
-│       └── *.lib            # Static link libraries
-├── bin/                      # Executable and runtime DLLs
-│   ├── CTP_Trader.exe       # Main executable
-│   └── *.dll                # Required runtime DLLs
-├── src/                      # Source code
-│   ├── main.c               # GUI application entry point
-│   ├── ctp_trader.cpp       # CTP API wrapper
-│   └── ctp_trader.h         # Header file
-├── req/                      # Requirements and documentation
-│   ├── 当日持仓.csv          # Sample position data
-│   ├── 当日委托.csv          # Sample order data
-│   ├── 商品参数.xlsx         # Instrument parameters
-│   └── 商品行情.xlsx         # Market data
-├── build.ps1                 # PowerShell build script (recommended)
-├── compile.bat               # Batch build script
-├── BUILD_SUCCESS.md          # Build report
-└── README.md                 # This file
-```
-
-## Features
-
-- **Windows GUI**: Native Win32 API-based interface
-- **CTP Trading API**: Connect to CTP trading servers
-- **Query Functions**:
-  - Order queries (当日委托)
-  - Position queries (当日持仓)
-  - Market data queries (商品行情)
-  - Instrument queries (商品参数)
-- **Real-time Updates**: Status bar with connection and query status
-
-## Requirements
-
-- **OS**: Windows 10/11 (64-bit)
-- **Compiler**: Visual Studio 2022 with C++ development tools
-- **CTP API**: Version 1.7.3-P2 (included in `api/` directory)
-
-## Build Instructions
-
-### Method 1: PowerShell Script (Recommended)
-
-Simply run the PowerShell build script:
-
+### 1. 编译项目
 ```powershell
 .\build.ps1
 ```
 
-This script will:
-- Automatically detect VS2022 installation
-- Set up x64 build environment
-- Clean old build files
-- Compile and link the project
-
-### Method 2: Batch File
-
-1. Open **"x64 Native Tools Command Prompt for VS 2022"** from Start Menu
-2. Navigate to project directory:
-   ```cmd
-   cd /d d:\projects\other\cexsample
-   ```
-3. Run the build script:
-   ```cmd
-   compile.bat
-   ```
-
-## Running the Application
-
-After successful build, the executable is located at `bin\CTP_Trader.exe`.
-
-All required DLLs are already copied to the `bin\` directory, so you can run it directly:
-
-```cmd
-.\bin\CTP_Trader.exe
+### 2. 运行程序
+```powershell
+.\run.bat
 ```
 
-Or simply double-click `bin\CTP_Trader.exe` in Windows Explorer.
+### 3. 使用说明
 
-## Configuration
+#### 交易功能
+1. 输入券商代码、用户名、密码和交易前置地址
+2. 点击"连接并登录"
+3. 登录成功后可以：
+   - 查询合约列表
+   - 查询持仓信息
+   - 查询当日委托
 
-Default connection parameters are in `src/main.c`:
+#### 行情功能
+1. 输入行情前置地址（通常与交易前置不同端口）
+2. 点击"连接行情"
+3. 从合约列表中选择合约（双击或选中自动填充）
+4. 点击"订阅行情"查看实时行情
 
-```c
-const char* BROKER_ID = "1010";
-const char* USER_ID = "20833";
-const char* PASSWORD = "******";
-const char* FRONT_ADDR = "tcp://106.37.101.162:31213";
-const char* AUTH_CODE = "YHQHYHQHYHQHYHQH";
+**⚠️ 注意**：行情数据仅在交易时段推送
+- 白盘：09:00-15:00（周一至周五）
+- 夜盘：21:00-02:30（部分品种）
+
+## 项目结构
+
+```
+cexsample/
+├── api/
+│   └── allapi/              # CTP API 统一库（SE版本）
+│       ├── *.h              # 头文件（TraderApi & MdApi）
+│       ├── *.lib            # 静态库
+│       └── *.dll            # 动态库
+├── bin/                     # 可执行文件目录
+│   ├── CTP_Trader.exe       # 主程序
+│   └── *.dll                # 运行时依赖DLL
+├── src/                     # 源代码
+│   ├── main.c               # GUI界面和主逻辑
+│   ├── ctp_trader.cpp       # CTP API封装
+│   └── ctp_trader.h         # 接口定义
+├── flow/                    # CTP流文件（自动生成）
+├── obj/                     # 编译中间文件
+├── build.ps1                # 编译脚本（推荐）
+└── run.bat                  # 运行脚本
 ```
 
-Modify these values according to your CTP account settings.
+## 技术架构
 
-## Technical Details
+### API 集成
+- **TraderApi**：交易接口（认证、登录、查询、报单）
+- **MdApi**：行情接口（连接、订阅、实时推送）
 
-- **Language**: C/C++ hybrid
-- **GUI Framework**: Win32 API
-- **Architecture**: x64 (64-bit)
-- **Compiler**: MSVC v18.1.1+ 
-- **Encoding**: UTF-8 with `/utf-8` flag
-- **Runtime**: Multithreaded DLL (`/MD`)
+### 编译环境
+- **编译器**：Visual Studio 2022 MSVC (x64)
+- **语言**：C/C++ 混编（UNICODE模式）
+- **UI框架**：Win32 API
+- **库文件**：
+  - `thosttraderapi_se.lib` (3.5MB)
+  - `thostmduserapi_se.lib` (3.1MB)
 
-## Build Configuration
+### 编译过程
+```
+[1/4] 清理旧文件
+[2/4] 编译 C++ 文件 (ctp_trader.cpp)
+[3/4] 编译 C 文件 (main.c)
+[4/4] 链接生成可执行文件
+[5/5] 复制 DLL 到 bin 目录
+```
 
-### Compiler Flags
-- **C++**: `/EHsc /MD /O2 /utf-8`
-- **C**: `/MD /O2 /utf-8`
+## 常见问题
 
-### Linker Settings
-- Subsystem: Windows GUI
-- Libraries: `user32.lib gdi32.lib comctl32.lib ws2_32.lib`
-- CTP Libraries: `thosttraderapi_se.lib thostmduserapi_se.lib`
+### 1. 杀毒软件误报
+**问题**：Windows Defender 删除 `CTP_Trader.exe`
 
-## Troubleshooting
+**解决方案**：
+```powershell
+# 以管理员身份运行
+.\add_exclusion.ps1
+```
 
-### Build Errors
+或手动添加排除项：
+- Windows 安全中心 → 病毒和威胁防护 → 管理设置 → 排除项
+- 添加文件夹：`D:\projects\other\cexsample\bin`
 
-If you encounter encoding errors (C4819, C2146), ensure:
-1. All source files are UTF-8 encoded
-2. Using the `/utf-8` compiler flag
-3. Running in VS2022 x64 Developer Command Prompt
+### 2. 编译失败
+**问题**：找不到 `vcvars64.bat`
 
-### Runtime Errors
+**解决方案**：
+- 确保安装了 Visual Studio 2022
+- 检查路径：`C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat`
+- 修改 `build.ps1` 中的路径
 
-If the program fails to start:
-1. Ensure all DLL files are in `bin\` directory
-2. Check that you're using the x64 version
-3. Verify CTP server address and credentials
+### 3. 行情无数据
+**问题**：订阅行情后界面无反应
 
-## License
+**原因**：不在交易时段，服务器不推送数据
 
-This is a sample project for educational purposes.
+**解决方案**：
+- 在交易时段测试（09:00-15:00 或 21:00-02:30）
+- 查看 `ctp_debug.log` 确认订阅成功
+- 确保行情前置地址正确
 
-## References
+### 4. 连接失败
+**检查项**：
+- 网络连接是否正常
+- 前置地址格式：`tcp://IP:PORT`
+- 券商代码、用户名、密码是否正确
+- 查看 `flow/` 目录下的错误日志
 
-- [CTP API Documentation](api/doc/SFIT_CTP_Mini_API_V1.7.3-P2.pdf)
-- Build report: [BUILD_SUCCESS.md](BUILD_SUCCESS.md)
+## 调试信息
+
+程序运行时会生成 `ctp_debug.log` 日志文件，记录：
+- API 初始化过程
+- 连接和登录状态
+- 查询和订阅操作
+- 回调函数执行情况
+
+查看日志：
+```powershell
+Get-Content ctp_debug.log -Tail 50
+```
+
+## 开发说明
+
+### 修改代码后重新编译
+```powershell
+# 强制终止旧进程并重新编译
+taskkill /F /IM CTP_Trader.exe 2>$null
+.\build.ps1
+.\run.bat
+```
+
+### 添加新功能
+1. 修改 `src/ctp_trader.h` 添加接口声明
+2. 在 `src/ctp_trader.cpp` 实现功能
+3. 在 `src/main.c` 添加UI控件和事件处理
+4. 重新编译测试
+
+### API 文档
+参考：`api/doc/SFIT_CTP_Mini_API_V1.7.3-P2.pdf`
+
+## 版本信息
+
+- **CTP API 版本**：6.x.x（SE标准版）
+- **编译器**：MSVC 19.x (Visual Studio 2022)
+- **目标平台**：Windows x64
+- **字符集**：UNICODE
+
+## 许可证
+
+本项目仅供学习和研究使用，请遵守相关法律法规和 CTP API 使用协议。
+
+---
+
+**最后更新**：2026年1月13日

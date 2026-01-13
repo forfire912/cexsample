@@ -1,7 +1,7 @@
 // CTP Trading API Wrapper
 #include "ctp_trader.h"
-#include "../api/traderapi/ThostFtdcTraderApi.h"
-#include "../api/mdapi/ThostFtdcMdApi.h"
+#include "../api/allapi/ThostFtdcTraderApi.h"
+#include "../api/allapi/ThostFtdcMdApi.h"
 #include <stdio.h>
 #include <string.h>
 #include <commctrl.h>
@@ -258,14 +258,17 @@ public:
     
     virtual void OnRspSubMarketData(CThostFtdcSpecificInstrumentField *pSpecificInstrument, 
                                     CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
+        LogMessage("OnRspSubMarketData called");
         if (pRspInfo && pRspInfo->ErrorID != 0) {
             char msg[256];
-            sprintf(msg, "订阅行情失败: %s", pRspInfo->ErrorMsg);
+            sprintf(msg, "订阅行情失败: ErrorID=%d, %s", pRspInfo->ErrorID, pRspInfo->ErrorMsg);
             UpdateStatus(msg);
+            LogMessage(msg);
         } else if (pSpecificInstrument) {
             char msg[256];
             sprintf(msg, "订阅行情成功: %s", pSpecificInstrument->InstrumentID);
             UpdateStatus(msg);
+            LogMessage(msg);
         }
     }
     
@@ -283,7 +286,19 @@ public:
     }
     
     virtual void OnRtnDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMarketData) {
-        if (!pDepthMarketData) return;
+        LogMessage("OnRtnDepthMarketData called");
+        
+        if (!pDepthMarketData) {
+            LogMessage("ERROR: pDepthMarketData is NULL");
+            return;
+        }
+        
+        char logMsg[256];
+        sprintf(logMsg, "Received market data: %s, LastPrice=%.2f, Volume=%d", 
+                pDepthMarketData->InstrumentID, 
+                pDepthMarketData->LastPrice,
+                pDepthMarketData->Volume);
+        LogMessage(logMsg);
         
         // 清空列表并设置列
         ClearListView();

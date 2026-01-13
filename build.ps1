@@ -49,7 +49,7 @@ if (Test-Path $vswhere) {
             
             # Link
             Write-Host "[4/4] Linking..." -ForegroundColor Yellow
-            $cmd3 = "call `"$vcvars`" && link /nologo /SUBSYSTEM:WINDOWS /OUT:bin\CTP_Trader.exe obj\main.obj obj\ctp_trader.obj api\traderapi\thosttraderapi.lib api\mdapi\thostmduserapi.lib user32.lib gdi32.lib comctl32.lib ws2_32.lib"
+            $cmd3 = "call `"$vcvars`" && link /nologo /SUBSYSTEM:WINDOWS /OUT:bin\CTP_Trader.exe obj\main.obj obj\ctp_trader.obj api\allapi\thosttraderapi_se.lib api\allapi\thostmduserapi_se.lib user32.lib gdi32.lib comctl32.lib ws2_32.lib"
             $result3 = cmd /c $cmd3 2>&1
             Write-Host $result3
             
@@ -58,6 +58,12 @@ if (Test-Path $vswhere) {
                 pause
                 exit 1
             }
+            
+            # Copy DLL files to bin directory
+            Write-Host "`n[5/5] Copying DLL files..." -ForegroundColor Yellow
+            Copy-Item "api\allapi\thosttraderapi_se.dll" "bin\" -Force
+            Copy-Item "api\allapi\thostmduserapi_se.dll" "bin\" -Force
+            Write-Host "DLL files copied successfully" -ForegroundColor Green
             
             Write-Host "`n==========================================`n" -ForegroundColor Green
             Write-Host "   Build Successful!`n" -ForegroundColor Green
