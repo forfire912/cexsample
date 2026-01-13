@@ -1,4 +1,5 @@
 // CTP Trading API Wrapper
+#pragma execution_character_set("utf-8")
 #include "ctp_trader.h"
 #include "../api/allapi/ThostFtdcTraderApi.h"
 #include "../api/allapi/ThostFtdcMdApi.h"
@@ -62,35 +63,42 @@ public:
             while (ListView_DeleteColumn(hListView, 0));
         }
     }
-    
-    void AddColumn(int col, const char* text, int width) {
+
+    // 统一的列头添加函数，直接使用宽字符串和 SendMessage
+    void AddColumn(int col, const WCHAR* text, int width) {
         if (!hListView) return;
-        LVCOLUMN lvc = {0};
+        LVCOLUMNW lvc = {0};
         lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
         lvc.fmt = LVCFMT_LEFT;
         lvc.cx = width;
-        lvc.pszText = (LPSTR)text;
-        ListView_InsertColumn(hListView, col, &lvc);
+        lvc.pszText = (LPWSTR)text;
+        SendMessage(hListView, LVM_INSERTCOLUMNW, col, (LPARAM)&lvc);
     }
-    
+
+    // 表格内容：CTP 返回的是 GBK，多字节转宽字
     void AddItem(int row, int col, const char* text) {
         if (!hListView) return;
+        WCHAR wtext[256];
+        MultiByteToWideChar(CP_ACP, 0, text, -1, wtext, 256);
         if (col == 0) {
-            LVITEM lvi = {0};
+            LVITEMW lvi = {0};
             lvi.mask = LVIF_TEXT;
             lvi.iItem = row;
             lvi.iSubItem = 0;
-            lvi.pszText = (LPSTR)text;
-            ListView_InsertItem(hListView, &lvi);
+            lvi.pszText = wtext;
+            SendMessage(hListView, LVM_INSERTITEMW, 0, (LPARAM)&lvi);
         } else {
-            ListView_SetItemText(hListView, row, col, (LPSTR)text);
+            LVITEMW lvi2 = {0};
+            lvi2.iSubItem = col;
+            lvi2.pszText = wtext;
+            SendMessage(hListView, LVM_SETITEMTEXTW, row, (LPARAM)&lvi2);
         }
     }
     
     virtual void OnFrontConnected() {
         isConnected = true;
         LogMessage("OnFrontConnected called");
-        UpdateStatus("Connected, authenticating...");
+        UpdateStatus("已连接服务器，正在认证...");
         CThostFtdcReqAuthenticateField req = {0};
         strcpy(req.BrokerID, brokerID);
         strcpy(req.UserID, userID);
@@ -106,7 +114,7 @@ public:
         char msg[128];
         sprintf(msg, "OnFrontDisconnected: reason=%d", nReason);
         LogMessage(msg);
-        sprintf(msg, "Disconnected, reason: %d", nReason);
+        sprintf(msg, "连接断开，原因代码: %d", nReason);
         UpdateStatus(msg);
     }
     
@@ -114,12 +122,12 @@ public:
                                    CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
         if (pRspInfo && pRspInfo->ErrorID != 0) {
             char msg[256];
-            sprintf(msg, "Auth failed: %s", pRspInfo->ErrorMsg);
+            sprintf(msg, "认证失败: %s", pRspInfo->ErrorMsg);
             UpdateStatus(msg);
             return;
         }
         isAuthenticated = true;
-        UpdateStatus("Auth success, logging in...");
+        UpdateStatus("认证成功，正在登录...");
         CThostFtdcReqUserLoginField req = {0};
         strcpy(req.BrokerID, brokerID);
         strcpy(req.UserID, userID);
@@ -131,13 +139,13 @@ public:
                                CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
         if (pRspInfo && pRspInfo->ErrorID != 0) {
             char msg[256];
-            sprintf(msg, "Login failed: %s", pRspInfo->ErrorMsg);
+            sprintf(msg, "登录失败: %s", pRspInfo->ErrorMsg);
             UpdateStatus(msg);
             return;
         }
         isLoggedIn = true;
         char msg[256];
-        sprintf(msg, "Login success! TradingDay: %s", pRspUserLogin ? pRspUserLogin->TradingDay : "N/A");
+        sprintf(msg, "登录成功！交易日: %s", pRspUserLogin ? pRspUserLogin->TradingDay : "未知");
         UpdateStatus(msg);
     }
     
@@ -191,28 +199,34 @@ public:
             }
         }
     }
-    
-    void AddColumn(int col, const char* text, int width) {
+
+    // 统一的列头添加函数，直接使用宽字符串和 SendMessage
+    void AddColumn(int col, const WCHAR* text, int width) {
         if (!hListView) return;
-        LVCOLUMN lvc = {0};
+        LVCOLUMNW lvc = {0};
         lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
         lvc.fmt = LVCFMT_LEFT;
         lvc.cx = width;
-        lvc.pszText = (LPSTR)text;
-        ListView_InsertColumn(hListView, col, &lvc);
+        lvc.pszText = (LPWSTR)text;
+        SendMessage(hListView, LVM_INSERTCOLUMNW, col, (LPARAM)&lvc);
     }
-    
+
     void AddItem(int row, int col, const char* text) {
         if (!hListView) return;
+        WCHAR wtext[256];
+        MultiByteToWideChar(CP_ACP, 0, text, -1, wtext, 256);
         if (col == 0) {
-            LVITEM lvi = {0};
+            LVITEMW lvi = {0};
             lvi.mask = LVIF_TEXT;
             lvi.iItem = row;
             lvi.iSubItem = 0;
-            lvi.pszText = (LPSTR)text;
-            ListView_InsertItem(hListView, &lvi);
+            lvi.pszText = wtext;
+            SendMessage(hListView, LVM_INSERTITEMW, 0, (LPARAM)&lvi);
         } else {
-            ListView_SetItemText(hListView, row, col, (LPSTR)text);
+            LVITEMW lvi2 = {0};
+            lvi2.iSubItem = col;
+            lvi2.pszText = wtext;
+            SendMessage(hListView, LVM_SETITEMTEXTW, row, (LPARAM)&lvi2);
         }
     }
     
@@ -302,17 +316,17 @@ public:
         
         // 清空列表并设置列
         ClearListView();
-        AddColumn(0, "Instrument", 100);
-        AddColumn(1, "LastPrice", 80);
-        AddColumn(2, "PreClose", 80);
-        AddColumn(3, "Open", 80);
-        AddColumn(4, "High", 80);
-        AddColumn(5, "Low", 80);
-        AddColumn(6, "Volume", 80);
-        AddColumn(7, "OpenInt", 80);
-        AddColumn(8, "Change", 80);
-        AddColumn(9, "Change%", 80);
-        AddColumn(10, "UpdateTime", 100);
+        AddColumn(0, L"合约代码", 100);
+        AddColumn(1, L"最新价", 80);
+        AddColumn(2, L"昨收价", 80);
+        AddColumn(3, L"开盘价", 80);
+        AddColumn(4, L"最高价", 80);
+        AddColumn(5, L"最低价", 80);
+        AddColumn(6, L"成交量", 80);
+        AddColumn(7, L"持仓量", 80);
+        AddColumn(8, L"涨跌", 80);
+        AddColumn(9, L"涨跌幅", 80);
+        AddColumn(10, L"更新时间", 100);
         
         char buf[256];
         AddItem(0, 0, pDepthMarketData->InstrumentID);
@@ -358,7 +372,7 @@ public:
 void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[256];
-        sprintf(msg, "Query order failed: %s", pRspInfo->ErrorMsg);
+        sprintf(msg, "查询委托失败: %s", pRspInfo->ErrorMsg);
         UpdateStatus(msg);
         return;
     }
@@ -366,15 +380,15 @@ void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoFie
     static int lastRequestID = 0;
     if (lastRequestID != nRequestID) {
         ClearListView();
-        AddColumn(0, "Time", 90);
-        AddColumn(1, "Instrument", 100);
-        AddColumn(2, "Direction", 60);
-        AddColumn(3, "Offset", 60);
-        AddColumn(4, "Price", 80);
-        AddColumn(5, "Volume", 60);
-        AddColumn(6, "Traded", 60);
-        AddColumn(7, "Status", 100);
-        AddColumn(8, "Remark", 150);
+        AddColumn(0, L"时间", 90);
+        AddColumn(1, L"合约", 100);
+        AddColumn(2, L"方向", 60);
+        AddColumn(3, L"开平", 60);
+        AddColumn(4, L"价格", 80);
+        AddColumn(5, L"数量", 60);
+        AddColumn(6, L"成交", 60);
+        AddColumn(7, L"状态", 100);
+        AddColumn(8, L"备注", 150);
         row = 0;
         lastRequestID = nRequestID;
     }
@@ -391,17 +405,17 @@ void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoFie
         sprintf(buf, "%d", pOrder->VolumeTraded);
         AddItem(row, 6, buf);
         const char* status = "Unknown";
-        if (pOrder->OrderStatus == '0') status = "AllTraded";
-        else if (pOrder->OrderStatus == '1') status = "PartTraded";
-        else if (pOrder->OrderStatus == '3') status = "NoTrade";
-        else if (pOrder->OrderStatus == '5') status = "Canceled";
+        if (pOrder->OrderStatus == '0') status = "全部成交";
+        else if (pOrder->OrderStatus == '1') status = "部分成交";
+        else if (pOrder->OrderStatus == '3') status = "未成交";
+        else if (pOrder->OrderStatus == '5') status = "已撤单";
         AddItem(row, 7, status);
         AddItem(row, 8, pOrder->StatusMsg);
         row++;
     }
     if (bIsLast) {
         char msg[128];
-        sprintf(msg, "Query order complete, count: %d", row);
+        sprintf(msg, "委托查询完成，共 %d 条记录", row);
         UpdateStatus(msg);
     }
 }
@@ -409,7 +423,7 @@ void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoFie
 void TraderSpi::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInvestorPosition, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[256];
-        sprintf(msg, "Query position failed: %s", pRspInfo->ErrorMsg);
+        sprintf(msg, "查询持仓失败: %s", pRspInfo->ErrorMsg);
         UpdateStatus(msg);
         return;
     }
@@ -417,22 +431,22 @@ void TraderSpi::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInves
     static int lastRequestID = 0;
     if (lastRequestID != nRequestID) {
         ClearListView();
-        AddColumn(0, "Instrument", 100);
-        AddColumn(1, "Direction", 60);
-        AddColumn(2, "Position", 60);
-        AddColumn(3, "TodayPos", 60);
-        AddColumn(4, "YdPos", 60);
-        AddColumn(5, "AvgPrice", 80);
-        AddColumn(6, "TodayAvg", 80);
-        AddColumn(7, "Profit", 100);
-        AddColumn(8, "TodayProfit", 100);
+        AddColumn(0, L"合约", 100);
+        AddColumn(1, L"方向", 60);
+        AddColumn(2, L"持仓", 60);
+        AddColumn(3, L"今仓", 60);
+        AddColumn(4, L"昨仓", 60);
+        AddColumn(5, L"均价", 80);
+        AddColumn(6, L"今均价", 80);
+        AddColumn(7, L"盈亏", 100);
+        AddColumn(8, L"今盈亏", 100);
         row = 0;
         lastRequestID = nRequestID;
     }
     if (pInvestorPosition) {
         char buf[256];
         AddItem(row, 0, pInvestorPosition->InstrumentID);
-        AddItem(row, 1, pInvestorPosition->PosiDirection == '2' ? "Long" : "Short");
+        AddItem(row, 1, pInvestorPosition->PosiDirection == '2' ? "多头" : "空头");
         sprintf(buf, "%d", pInvestorPosition->Position);
         AddItem(row, 2, buf);
         sprintf(buf, "%d", pInvestorPosition->TodayPosition);
@@ -453,7 +467,7 @@ void TraderSpi::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInves
     }
     if (bIsLast) {
         char msg[128];
-        sprintf(msg, "Query position complete, count: %d", row);
+        sprintf(msg, "持仓查询完成，共 %d 条记录", row);
         UpdateStatus(msg);
     }
 }
@@ -461,7 +475,7 @@ void TraderSpi::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInves
 void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMarketData, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[256];
-        sprintf(msg, "Query market failed: %s", pRspInfo->ErrorMsg);
+        sprintf(msg, "查询行情失败: %s", pRspInfo->ErrorMsg);
         UpdateStatus(msg);
         return;
     }
@@ -469,16 +483,16 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
     static int lastRequestID = 0;
     if (lastRequestID != nRequestID) {
         ClearListView();
-        AddColumn(0, "Instrument", 100);
-        AddColumn(1, "LastPrice", 80);
-        AddColumn(2, "PreClose", 80);
-        AddColumn(3, "Open", 80);
-        AddColumn(4, "High", 80);
-        AddColumn(5, "Low", 80);
-        AddColumn(6, "Volume", 80);
-        AddColumn(7, "OpenInt", 80);
-        AddColumn(8, "Change", 80);
-        AddColumn(9, "Change%", 80);
+        AddColumn(0, L"合约代码", 100);
+        AddColumn(1, L"最新价", 80);
+        AddColumn(2, L"昨收价", 80);
+        AddColumn(3, L"开盘价", 80);
+        AddColumn(4, L"最高价", 80);
+        AddColumn(5, L"最低价", 80);
+        AddColumn(6, L"成交量", 80);
+        AddColumn(7, L"持仓量", 80);
+        AddColumn(8, L"涨跌", 80);
+        AddColumn(9, L"涨跌幅", 80);
         row = 0;
         lastRequestID = nRequestID;
     }
@@ -508,14 +522,14 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
         row++;
     }
     if (bIsLast) {
-        UpdateStatus("Query market complete");
+        UpdateStatus("行情查询完成");
     }
 }
 
 void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[256];
-        sprintf(msg, "Query instrument failed: %s", pRspInfo->ErrorMsg);
+        sprintf(msg, "查询合约失败: %s", pRspInfo->ErrorMsg);
         UpdateStatus(msg);
         return;
     }
@@ -526,14 +540,14 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
     
     if (lastRequestID != nRequestID) {
         ClearListView();
-        AddColumn(0, "InstrumentID", 100);
-        AddColumn(1, "Name", 150);
-        AddColumn(2, "Exchange", 80);
-        AddColumn(3, "ProductID", 100);
-        AddColumn(4, "Multiplier", 80);
-        AddColumn(5, "PriceTick", 80);
-        AddColumn(6, "ExpireDate", 100);
-        AddColumn(7, "OpenDate", 100);
+        AddColumn(0, L"合约代码", 100);
+        AddColumn(1, L"合约名称", 150);
+        AddColumn(2, L"交易所", 80);
+        AddColumn(3, L"品种代码", 100);
+        AddColumn(4, L"合约乘数", 80);
+        AddColumn(5, L"最小变动", 80);
+        AddColumn(6, L"到期日", 100);
+        AddColumn(7, L"上市日", 100);
         row = 0;
         totalCount = 0;
         lastRequestID = nRequestID;
@@ -559,9 +573,9 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
     if (bIsLast) {
         char msg[256];
         if (totalCount > MAX_DISPLAY) {
-            sprintf(msg, "Query instrument complete, total: %d, displayed: %d (limited)", totalCount, MAX_DISPLAY);
+            sprintf(msg, "合约查询完成，总数: %d，已显示: %d（已限制显示数量）", totalCount, MAX_DISPLAY);
         } else {
-            sprintf(msg, "Query instrument complete, count: %d", totalCount);
+            sprintf(msg, "合约查询完成，共 %d 个合约", totalCount);
         }
         UpdateStatus(msg);
     }
@@ -636,7 +650,7 @@ extern "C" int ConnectAndLogin(CTPTrader* trader, const char* brokerID, const ch
     
     // Check if already initialized
     if (pSpi->pUserApi != NULL) {
-        pSpi->UpdateStatus("Already connected or connecting...");
+        pSpi->UpdateStatus("已连接或正在连接中...");
         LogMessage("WARNING: Already connected");
         return -1;
     }
@@ -659,7 +673,7 @@ extern "C" int ConnectAndLogin(CTPTrader* trader, const char* brokerID, const ch
         LogMessage("Creating API instance...");
         pSpi->pUserApi = CThostFtdcTraderApi::CreateFtdcTraderApi("./flow/");
         if (!pSpi->pUserApi) {
-            pSpi->UpdateStatus("Failed to create API instance");
+            pSpi->UpdateStatus("创建API实例失败");
             LogMessage("ERROR: Failed to create API instance");
             return -1;
         }
@@ -706,9 +720,9 @@ extern "C" int ConnectAndLogin(CTPTrader* trader, const char* brokerID, const ch
         
         LogMessage("API Init called - waiting for connection...");
         
-        pSpi->UpdateStatus("API initialized, connecting...");
+        pSpi->UpdateStatus("API已初始化，正在连接...");
     } catch (...) {
-        pSpi->UpdateStatus("Exception occurred during API initialization");
+        pSpi->UpdateStatus("API初始化过程中发生异常");
         LogMessage("EXCEPTION: During API initialization");
         return -1;
     }
