@@ -8,6 +8,30 @@
 #include <commctrl.h>
 #include <time.h>
 
+// Helper function to convert UTF-8 string to GBK string
+// Returns a new allocated string that must be deleted by the caller.
+char* Utf8ToGbk(const char* utf8Str) {
+    if (!utf8Str) return NULL;
+
+    // 1. Convert UTF-8 to Wide Char (Unicode)
+    int wideCharLen = MultiByteToWideChar(CP_UTF8, 0, utf8Str, -1, NULL, 0);
+    if (wideCharLen == 0) return NULL;
+    WCHAR* wideCharStr = new WCHAR[wideCharLen];
+    MultiByteToWideChar(CP_UTF8, 0, utf8Str, -1, wideCharStr, wideCharLen);
+
+    // 2. Convert Wide Char (Unicode) to GBK (ACP)
+    int gbkLen = WideCharToMultiByte(CP_ACP, 0, wideCharStr, -1, NULL, 0, NULL, NULL);
+    if (gbkLen == 0) {
+        delete[] wideCharStr;
+        return NULL;
+    }
+    char* gbkStr = new char[gbkLen];
+    WideCharToMultiByte(CP_ACP, 0, wideCharStr, -1, gbkStr, gbkLen, NULL, NULL);
+
+    delete[] wideCharStr;
+    return gbkStr;
+}
+
 void LogMessage(const char* msg) {
     FILE* f = fopen("ctp_debug.log", "a");
     if (f) {
@@ -74,8 +98,8 @@ public:
         lvc.pszText = (LPWSTR)text;
         SendMessage(hListView, LVM_INSERTCOLUMNW, col, (LPARAM)&lvc);
     }
-
-    // 表格内容：CTP 返回的是 GBK，多字节转宽字
+    
+    // This function now assumes the input text is always GBK (CP_ACP)
     void AddItem(int row, int col, const char* text) {
         if (!hListView) return;
         WCHAR wtext[256];
@@ -122,8 +146,10 @@ public:
                                    CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
         if (pRspInfo && pRspInfo->ErrorID != 0) {
             char msg[256];
-            sprintf(msg, "认证失败: %s", pRspInfo->ErrorMsg);
+            char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+            sprintf(msg, "认证失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
             UpdateStatus(msg);
+            if (gbkErrorMsg) delete[] gbkErrorMsg;
             return;
         }
         isAuthenticated = true;
@@ -139,8 +165,10 @@ public:
                                CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
         if (pRspInfo && pRspInfo->ErrorID != 0) {
             char msg[256];
-            sprintf(msg, "登录失败: %s", pRspInfo->ErrorMsg);
+            char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+            sprintf(msg, "登录失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
             UpdateStatus(msg);
+            if (gbkErrorMsg) delete[] gbkErrorMsg;
             return;
         }
         isLoggedIn = true;
@@ -210,7 +238,8 @@ public:
         lvc.pszText = (LPWSTR)text;
         SendMessage(hListView, LVM_INSERTCOLUMNW, col, (LPARAM)&lvc);
     }
-
+    
+    // This function now assumes the input text is always GBK (CP_ACP)
     void AddItem(int row, int col, const char* text) {
         if (!hListView) return;
         WCHAR wtext[256];
@@ -261,8 +290,10 @@ public:
                                 CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
         if (pRspInfo && pRspInfo->ErrorID != 0) {
             char msg[256];
-            sprintf(msg, "行情登录失败: %s", pRspInfo->ErrorMsg);
+            char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+            sprintf(msg, "行情登录失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
             UpdateStatus(msg);
+            if (gbkErrorMsg) delete[] gbkErrorMsg;
             return;
         }
         isLoggedIn = true;
@@ -275,9 +306,11 @@ public:
         LogMessage("OnRspSubMarketData called");
         if (pRspInfo && pRspInfo->ErrorID != 0) {
             char msg[256];
-            sprintf(msg, "订阅行情失败: ErrorID=%d, %s", pRspInfo->ErrorID, pRspInfo->ErrorMsg);
+            char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+            sprintf(msg, "订阅行情失败: ErrorID=%d, %s", pRspInfo->ErrorID, gbkErrorMsg ? gbkErrorMsg : "");
             UpdateStatus(msg);
             LogMessage(msg);
+            if (gbkErrorMsg) delete[] gbkErrorMsg;
         } else if (pSpecificInstrument) {
             char msg[256];
             sprintf(msg, "订阅行情成功: %s", pSpecificInstrument->InstrumentID);
@@ -290,8 +323,10 @@ public:
                                       CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
         if (pRspInfo && pRspInfo->ErrorID != 0) {
             char msg[256];
-            sprintf(msg, "取消订阅失败: %s", pRspInfo->ErrorMsg);
+            char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+            sprintf(msg, "取消订阅失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
             UpdateStatus(msg);
+            if (gbkErrorMsg) delete[] gbkErrorMsg;
         } else if (pSpecificInstrument) {
             char msg[256];
             sprintf(msg, "取消订阅成功: %s", pSpecificInstrument->InstrumentID);
@@ -372,8 +407,10 @@ public:
 void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[256];
-        sprintf(msg, "查询委托失败: %s", pRspInfo->ErrorMsg);
+        char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+        sprintf(msg, "查询委托失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
         UpdateStatus(msg);
+        if (gbkErrorMsg) delete[] gbkErrorMsg;
         return;
     }
     static int row = 0;
@@ -396,21 +433,26 @@ void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoFie
         char buf[256];
         AddItem(row, 0, pOrder->InsertTime);
         AddItem(row, 1, pOrder->InstrumentID);
-        AddItem(row, 2, pOrder->Direction == '0' ? "Buy" : "Sell");
-        AddItem(row, 3, pOrder->CombOffsetFlag[0] == '0' ? "Open" : "Close");
+        
+        // Convert UTF-8 literals to GBK
+        char* dir = Utf8ToGbk(pOrder->Direction == '0' ? "买" : "卖");
+        AddItem(row, 2, dir ? dir : "");
+        if (dir) delete[] dir;
+        
+        char* offset = Utf8ToGbk(pOrder->CombOffsetFlag[0] == '0' ? "开" : "平");
+        AddItem(row, 3, offset ? offset : "");
+        if (offset) delete[] offset;
+        
         sprintf(buf, "%.2f", pOrder->LimitPrice);
         AddItem(row, 4, buf);
         sprintf(buf, "%d", pOrder->VolumeTotalOriginal);
         AddItem(row, 5, buf);
         sprintf(buf, "%d", pOrder->VolumeTraded);
         AddItem(row, 6, buf);
-        const char* status = "Unknown";
-        if (pOrder->OrderStatus == '0') status = "全部成交";
-        else if (pOrder->OrderStatus == '1') status = "部分成交";
-        else if (pOrder->OrderStatus == '3') status = "未成交";
-        else if (pOrder->OrderStatus == '5') status = "已撤单";
-        AddItem(row, 7, status);
-        AddItem(row, 8, pOrder->StatusMsg);
+        
+        // StatusMsg is already GBK from CTP API
+        AddItem(row, 7, pOrder->StatusMsg);
+        AddItem(row, 8, "");
         row++;
     }
     if (bIsLast) {
@@ -423,8 +465,10 @@ void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoFie
 void TraderSpi::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInvestorPosition, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[256];
-        sprintf(msg, "查询持仓失败: %s", pRspInfo->ErrorMsg);
+        char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+        sprintf(msg, "查询持仓失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
         UpdateStatus(msg);
+        if (gbkErrorMsg) delete[] gbkErrorMsg;
         return;
     }
     static int row = 0;
@@ -446,7 +490,12 @@ void TraderSpi::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInves
     if (pInvestorPosition) {
         char buf[256];
         AddItem(row, 0, pInvestorPosition->InstrumentID);
-        AddItem(row, 1, pInvestorPosition->PosiDirection == '2' ? "多头" : "空头");
+        
+        // Convert UTF-8 literals to GBK
+        char* posDir = Utf8ToGbk(pInvestorPosition->PosiDirection == '2' ? "多" : "空");
+        AddItem(row, 1, posDir ? posDir : "");
+        if (posDir) delete[] posDir;
+        
         sprintf(buf, "%d", pInvestorPosition->Position);
         AddItem(row, 2, buf);
         sprintf(buf, "%d", pInvestorPosition->TodayPosition);
@@ -475,8 +524,10 @@ void TraderSpi::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInves
 void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMarketData, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[256];
-        sprintf(msg, "查询行情失败: %s", pRspInfo->ErrorMsg);
+        char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+        sprintf(msg, "查询行情失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
         UpdateStatus(msg);
+        if (gbkErrorMsg) delete[] gbkErrorMsg;
         return;
     }
     static int row = 0;
@@ -529,8 +580,10 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
 void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[256];
-        sprintf(msg, "查询合约失败: %s", pRspInfo->ErrorMsg);
+        char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+        sprintf(msg, "查询合约失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
         UpdateStatus(msg);
+        if (gbkErrorMsg) delete[] gbkErrorMsg;
         return;
     }
     static int row = 0;
