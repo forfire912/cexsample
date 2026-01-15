@@ -281,50 +281,56 @@ void CreateQueryPanel(HWND hParent, HINSTANCE hInstance) {
     }
     SetWindowLongPtr(g_hQueryPanel, GWLP_WNDPROC, (LONG_PTR)PanelProc);
     
-    // 调整控件布局，减少界面留白
-    int x = 20;  // 左侧边距
-    int y = 20;  // 顶部边距
-
+    // 优化后的紧凑布局
+    int x = 15;  // 左侧边距
+    int y = 10;  // 顶部边距
+    
+    // 快速查询按钮区
     g_hQueryControls[g_nQueryControlCount++] = CreateWindow(TEXT("STATIC"), TEXT("快速查询:"), WS_CHILD, 
-                 x, y, 80, 24, g_hQueryPanel, NULL, hInstance, NULL);
-    y += 30;
-
+                 x, y, 80, 20, g_hQueryPanel, NULL, hInstance, NULL);
+    
     g_hQueryControls[g_nQueryControlCount++] = CreateWindow(TEXT("BUTTON"), TEXT("查询委托"), WS_CHILD | BS_PUSHBUTTON,
-                 x, y, 100, 30, g_hQueryPanel, (HMENU)IDC_BTN_QUERY_ORDER, hInstance, NULL);
+                 x+85, y-2, 90, 28, g_hQueryPanel, (HMENU)IDC_BTN_QUERY_ORDER, hInstance, NULL);
     g_hQueryControls[g_nQueryControlCount++] = CreateWindow(TEXT("BUTTON"), TEXT("查询持仓"), WS_CHILD | BS_PUSHBUTTON,
-                 x+110, y, 100, 30, g_hQueryPanel, (HMENU)IDC_BTN_QUERY_POS, hInstance, NULL);
+                 x+185, y-2, 90, 28, g_hQueryPanel, (HMENU)IDC_BTN_QUERY_POS, hInstance, NULL);
     g_hQueryControls[g_nQueryControlCount++] = CreateWindow(TEXT("BUTTON"), TEXT("查询行情"), WS_CHILD | BS_PUSHBUTTON,
-                 x+220, y, 100, 30, g_hQueryPanel, (HMENU)IDC_BTN_QUERY_MARKET, hInstance, NULL);
+                 x+285, y-2, 90, 28, g_hQueryPanel, (HMENU)IDC_BTN_QUERY_MARKET, hInstance, NULL);
     g_hQueryControls[g_nQueryControlCount++] = CreateWindow(TEXT("BUTTON"), TEXT("查询合约"), WS_CHILD | BS_PUSHBUTTON,
-                 x+330, y, 100, 30, g_hQueryPanel, (HMENU)IDC_BTN_QUERY_INST, hInstance, NULL);
-    y += 45;
+                 x+385, y-2, 90, 28, g_hQueryPanel, (HMENU)IDC_BTN_QUERY_INST, hInstance, NULL);
+    y += 35;
     
-    // 条件查询
-    g_hQueryControls[g_nQueryControlCount++] = CreateWindow(TEXT("STATIC"), TEXT("条件查询:"), WS_CHILD, 
-                 x, y, 80, 24, g_hQueryPanel, NULL, hInstance, NULL);
-    y += 30;
-    
+    // 条件查询区
     g_hQueryControls[g_nQueryControlCount++] = CreateWindow(TEXT("STATIC"), TEXT("合约代码:"), WS_CHILD, 
-                 x, y+5, 70, 20, g_hQueryPanel, NULL, hInstance, NULL);
+                 x, y+3, 70, 20, g_hQueryPanel, NULL, hInstance, NULL);
     g_hEditQueryInstrument = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"), TEXT(""), 
                  WS_CHILD | WS_BORDER | ES_UPPERCASE, 
-                 x+75, y+2, 120, 24, g_hQueryPanel, (HMENU)IDC_EDIT_QUERY_INSTRUMENT, hInstance, NULL);
+                 x+75, y, 120, 24, g_hQueryPanel, (HMENU)IDC_EDIT_QUERY_INSTRUMENT, hInstance, NULL);
     g_hQueryControls[g_nQueryControlCount++] = g_hEditQueryInstrument;
     
-    g_hQueryControls[g_nQueryControlCount++] = CreateWindow(TEXT("STATIC"), TEXT("(点击列表自动填充)"), WS_CHILD, 
-                 x+205, y+5, 200, 20, g_hQueryPanel, NULL, hInstance, NULL);
+    g_hQueryControls[g_nQueryControlCount++] = CreateWindow(TEXT("STATIC"), TEXT("(点击下方列表可自动填充)"), WS_CHILD, 
+                 x+205, y+3, 250, 20, g_hQueryPanel, NULL, hInstance, NULL);
+    y += 35;
     
-    y += 40;
-    
-    // 数据显示区
+    // 查询结果区
     g_hQueryControls[g_nQueryControlCount++] = CreateWindow(TEXT("STATIC"), TEXT("查询结果:"), WS_CHILD, 
-                 x, y, 80, 24, g_hQueryPanel, NULL, hInstance, NULL);
-    y += 30;
+                 x, y, 80, 20, g_hQueryPanel, NULL, hInstance, NULL);
+    y += 25;
     
-    // ListView 直接创建在主窗口下，而不是 g_hQueryPanel，这样 WM_NOTIFY 可以正确传递
+    // ListView 直接创建在主窗口下，这样 WM_NOTIFY 可以正确传递
+    // 计算ListView的实际位置（相对于主窗口）
+    POINT pt = {0, 0};
+    ClientToScreen(g_hTabControl, &pt);
+    ScreenToClient(hParent, &pt);
+    
+    int listViewX = pt.x + x;
+    int listViewY = pt.y + y + 10;
+    int listViewWidth = 1120;
+    int listViewHeight = 390;
+    
     g_hListViewQuery = CreateWindowEx(0, WC_LISTVIEW, TEXT(""),
                  WS_CHILD | WS_BORDER | LVS_REPORT | LVS_SINGLESEL,
-                 x+10, y+60, 1100, 320, hParent, (HMENU)IDC_LISTVIEW_QUERY, hInstance, NULL);
+                 listViewX, listViewY, listViewWidth, listViewHeight, 
+                 hParent, (HMENU)IDC_LISTVIEW_QUERY, hInstance, NULL);
     g_hQueryControls[g_nQueryControlCount++] = g_hListViewQuery;
     ListView_SetExtendedListViewStyle(g_hListViewQuery, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 }
@@ -347,104 +353,98 @@ void CreateTradePanel(HWND hParent, HINSTANCE hInstance) {
     }
     SetWindowLongPtr(g_hTradePanel, GWLP_WNDPROC, (LONG_PTR)PanelProc);
     
-    int x = 20, y = 10;
+    int x = 10, y = 5;
     
-    // ===== 报单区域 =====
-    CreateWindow(TEXT("STATIC"), TEXT("【 报 单 区 】"), 
-                 WS_VISIBLE | WS_CHILD | SS_CENTER,
-                 x, y, 1100, 30, g_hTradePanel, NULL, hInstance, NULL);
-    y += 40;
+    // ===== 报单输入区域 =====
+    CreateWindow(TEXT("STATIC"), TEXT("报单输入"), 
+                 WS_VISIBLE | WS_CHILD | SS_LEFT,
+                 x, y, 80, 20, g_hTradePanel, NULL, hInstance, NULL);
+    y += 25;
     
-    // 合约代码
-    CreateWindow(TEXT("STATIC"), TEXT("合约代码:"), WS_VISIBLE | WS_CHILD, 
-                 x, y+5, 80, 20, g_hTradePanel, NULL, hInstance, NULL);
+    // 第一行：合约代码、交易方向、开平仓
+    CreateWindow(TEXT("STATIC"), TEXT("合约:"), WS_VISIBLE | WS_CHILD, 
+                 x, y+5, 45, 20, g_hTradePanel, NULL, hInstance, NULL);
     g_hEditTradeInstrument = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"), TEXT(""), 
                  WS_VISIBLE | WS_CHILD | WS_BORDER | ES_UPPERCASE, 
-                 x+85, y+2, 150, 26, g_hTradePanel, (HMENU)IDC_EDIT_TRADE_INSTRUMENT, hInstance, NULL);
-    CreateWindow(TEXT("STATIC"), TEXT("(可从查询TAB选择)"), WS_VISIBLE | WS_CHILD, 
-                 x+245, y+5, 200, 20, g_hTradePanel, NULL, hInstance, NULL);
+                 x+50, y+2, 120, 24, g_hTradePanel, (HMENU)IDC_EDIT_TRADE_INSTRUMENT, hInstance, NULL);
     
-    // 交易方向
-    CreateWindow(TEXT("STATIC"), TEXT("交易方向:"), WS_VISIBLE | WS_CHILD, 
-                 x+450, y+3, 80, 20, g_hTradePanel, NULL, hInstance, NULL);
-    g_hRadioBuy = CreateWindow(TEXT("BUTTON"), TEXT("买入"), 
+    CreateWindow(TEXT("STATIC"), TEXT("方向:"), WS_VISIBLE | WS_CHILD, 
+                 x+185, y+5, 45, 20, g_hTradePanel, NULL, hInstance, NULL);
+    g_hRadioBuy = CreateWindow(TEXT("BUTTON"), TEXT("买"), 
                  WS_VISIBLE | WS_CHILD | BS_AUTORADIOBUTTON | WS_GROUP,
-                 x+535, y, 70, 26, g_hTradePanel, (HMENU)IDC_RADIO_BUY, hInstance, NULL);
-    g_hRadioSell = CreateWindow(TEXT("BUTTON"), TEXT("卖出"), 
+                 x+230, y+3, 50, 20, g_hTradePanel, (HMENU)IDC_RADIO_BUY, hInstance, NULL);
+    g_hRadioSell = CreateWindow(TEXT("BUTTON"), TEXT("卖"), 
                  WS_VISIBLE | WS_CHILD | BS_AUTORADIOBUTTON,
-                 x+615, y, 70, 26, g_hTradePanel, (HMENU)IDC_RADIO_SELL, hInstance, NULL);
+                 x+285, y+3, 50, 20, g_hTradePanel, (HMENU)IDC_RADIO_SELL, hInstance, NULL);
     SendMessage(g_hRadioBuy, BM_SETCHECK, BST_CHECKED, 0);
     
-    // 开平仓
-    CreateWindow(TEXT("STATIC"), TEXT("开平仓:"), WS_VISIBLE | WS_CHILD, 
-                 x+720, y+3, 80, 20, g_hTradePanel, NULL, hInstance, NULL);
+    CreateWindow(TEXT("STATIC"), TEXT("开平:"), WS_VISIBLE | WS_CHILD, 
+                 x+350, y+5, 45, 20, g_hTradePanel, NULL, hInstance, NULL);
     g_hRadioOpen = CreateWindow(TEXT("BUTTON"), TEXT("开仓"), 
                  WS_VISIBLE | WS_CHILD | BS_AUTORADIOBUTTON | WS_GROUP,
-                 x+785, y, 70, 26, g_hTradePanel, (HMENU)IDC_RADIO_OPEN, hInstance, NULL);
+                 x+395, y+3, 60, 20, g_hTradePanel, (HMENU)IDC_RADIO_OPEN, hInstance, NULL);
     g_hRadioClose = CreateWindow(TEXT("BUTTON"), TEXT("平仓"), 
                  WS_VISIBLE | WS_CHILD | BS_AUTORADIOBUTTON,
-                 x+865, y, 70, 26, g_hTradePanel, (HMENU)IDC_RADIO_CLOSE, hInstance, NULL);
+                 x+460, y+3, 60, 20, g_hTradePanel, (HMENU)IDC_RADIO_CLOSE, hInstance, NULL);
     SendMessage(g_hRadioOpen, BM_SETCHECK, BST_CHECKED, 0);
-    y += 40;
+    y += 32;
     
-    // 价格和手数在同一行
-    CreateWindow(TEXT("STATIC"), TEXT("报单价格:"), WS_VISIBLE | WS_CHILD, 
-                 x, y+5, 80, 20, g_hTradePanel, NULL, hInstance, NULL);
+    // 第二行：价格、手数、提交按钮
+    CreateWindow(TEXT("STATIC"), TEXT("价格:"), WS_VISIBLE | WS_CHILD, 
+                 x, y+5, 45, 20, g_hTradePanel, NULL, hInstance, NULL);
     g_hEditTradePrice = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"), TEXT(""), 
                  WS_VISIBLE | WS_CHILD | WS_BORDER, 
-                 x+85, y+2, 150, 26, g_hTradePanel, (HMENU)IDC_EDIT_TRADE_PRICE, hInstance, NULL);
-    CreateWindow(TEXT("STATIC"), TEXT("元/吨"), WS_VISIBLE | WS_CHILD, 
-                 x+245, y+5, 80, 20, g_hTradePanel, NULL, hInstance, NULL);
+                 x+50, y+2, 120, 24, g_hTradePanel, (HMENU)IDC_EDIT_TRADE_PRICE, hInstance, NULL);
     
-    CreateWindow(TEXT("STATIC"), TEXT("报单手数:"), WS_VISIBLE | WS_CHILD, 
-                 x+350, y+5, 80, 20, g_hTradePanel, NULL, hInstance, NULL);
+    CreateWindow(TEXT("STATIC"), TEXT("手数:"), WS_VISIBLE | WS_CHILD, 
+                 x+185, y+5, 45, 20, g_hTradePanel, NULL, hInstance, NULL);
     g_hEditTradeVolume = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"), TEXT("1"), 
                  WS_VISIBLE | WS_CHILD | WS_BORDER, 
-                 x+435, y+2, 100, 26, g_hTradePanel, (HMENU)IDC_EDIT_TRADE_VOLUME, hInstance, NULL);
-    CreateWindow(TEXT("STATIC"), TEXT("手"), WS_VISIBLE | WS_CHILD, 
-                 x+545, y+5, 30, 20, g_hTradePanel, NULL, hInstance, NULL);
+                 x+230, y+2, 80, 24, g_hTradePanel, (HMENU)IDC_EDIT_TRADE_VOLUME, hInstance, NULL);
     
-    // 提交按钮
     CreateWindow(TEXT("BUTTON"), TEXT("提交报单 (F9)"), 
                  WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                 x+650, y, 200, 30, g_hTradePanel, (HMENU)IDC_BTN_SUBMIT_ORDER, hInstance, NULL);
-    y += 50;
+                 x+330, y, 190, 28, g_hTradePanel, (HMENU)IDC_BTN_SUBMIT_ORDER, hInstance, NULL);
+    
+    CreateWindow(TEXT("STATIC"), TEXT("(提示：先在查询TAB点击合约列表选择合约)"), WS_VISIBLE | WS_CHILD, 
+                 x+535, y+7, 400, 20, g_hTradePanel, NULL, hInstance, NULL);
+    y += 40;
     
     // 分隔线
-    CreateWindow(TEXT("STATIC"), TEXT("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"), 
-                 WS_VISIBLE | WS_CHILD,
-                 x, y, 1100, 20, g_hTradePanel, NULL, hInstance, NULL);
-    y += 30;
+    CreateWindow(TEXT("STATIC"), TEXT(""), 
+                 WS_VISIBLE | WS_CHILD | SS_ETCHEDHORZ,
+                 x, y, 1100, 2, g_hTradePanel, NULL, hInstance, NULL);
+    y += 10;
     
-    // ===== 持仓区域 =====
-    CreateWindow(TEXT("STATIC"), TEXT("【 当前持仓 】"), WS_VISIBLE | WS_CHILD, 
-                 x, y, 150, 24, g_hTradePanel, NULL, hInstance, NULL);
-    CreateWindow(TEXT("BUTTON"), TEXT("刷新持仓"), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                 x+920, y-2, 90, 28, g_hTradePanel, (HMENU)IDC_BTN_REFRESH_POS, hInstance, NULL);
-    CreateWindow(TEXT("BUTTON"), TEXT("平所有持仓"), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                 x+1020, y-2, 100, 28, g_hTradePanel, (HMENU)IDC_BTN_CLOSE_ALL, hInstance, NULL);
-    y += 35;
+    // ===== 持仓管理区域 =====
+    CreateWindow(TEXT("STATIC"), TEXT("持仓管理"), WS_VISIBLE | WS_CHILD, 
+                 x, y, 80, 20, g_hTradePanel, NULL, hInstance, NULL);
+    CreateWindow(TEXT("BUTTON"), TEXT("刷新"), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+                 x+950, y-2, 70, 24, g_hTradePanel, (HMENU)IDC_BTN_REFRESH_POS, hInstance, NULL);
+    CreateWindow(TEXT("BUTTON"), TEXT("平所有"), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+                 x+1030, y-2, 70, 24, g_hTradePanel, (HMENU)IDC_BTN_CLOSE_ALL, hInstance, NULL);
+    y += 28;
     
     // 持仓列表
     g_hListViewPosition = CreateWindowEx(0, WC_LISTVIEW, TEXT(""),
                  WS_VISIBLE | WS_CHILD | WS_BORDER | LVS_REPORT | LVS_SINGLESEL,
-                 x, y, 1100, 140, g_hTradePanel, (HMENU)IDC_LISTVIEW_POSITION, hInstance, NULL);
+                 x, y, 1100, 160, g_hTradePanel, (HMENU)IDC_LISTVIEW_POSITION, hInstance, NULL);
     ListView_SetExtendedListViewStyle(g_hListViewPosition, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
-    y += 155;
+    y += 170;
     
-    // ===== 委托区域 =====
-    CreateWindow(TEXT("STATIC"), TEXT("【 当前委托 】"), WS_VISIBLE | WS_CHILD, 
-                 x, y, 150, 24, g_hTradePanel, NULL, hInstance, NULL);
-    CreateWindow(TEXT("BUTTON"), TEXT("刷新委托"), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                 x+920, y-2, 90, 28, g_hTradePanel, (HMENU)IDC_BTN_REFRESH_ORDERS, hInstance, NULL);
-    CreateWindow(TEXT("BUTTON"), TEXT("取消所有委托"), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                 x+1020, y-2, 100, 28, g_hTradePanel, (HMENU)IDC_BTN_CANCEL_ALL, hInstance, NULL);
-    y += 35;
+    // ===== 委托管理区域 =====
+    CreateWindow(TEXT("STATIC"), TEXT("委托管理"), WS_VISIBLE | WS_CHILD, 
+                 x, y, 80, 20, g_hTradePanel, NULL, hInstance, NULL);
+    CreateWindow(TEXT("BUTTON"), TEXT("刷新"), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+                 x+950, y-2, 70, 24, g_hTradePanel, (HMENU)IDC_BTN_REFRESH_ORDERS, hInstance, NULL);
+    CreateWindow(TEXT("BUTTON"), TEXT("撤所有"), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+                 x+1030, y-2, 70, 24, g_hTradePanel, (HMENU)IDC_BTN_CANCEL_ALL, hInstance, NULL);
+    y += 28;
     
     // 委托列表
     g_hListViewOrders = CreateWindowEx(0, WC_LISTVIEW, TEXT(""),
                  WS_VISIBLE | WS_CHILD | WS_BORDER | LVS_REPORT | LVS_SINGLESEL,
-                 x, y, 1100, 140, g_hTradePanel, (HMENU)IDC_LISTVIEW_ORDERS, hInstance, NULL);
+                 x, y, 1100, 160, g_hTradePanel, (HMENU)IDC_LISTVIEW_ORDERS, hInstance, NULL);
     ListView_SetExtendedListViewStyle(g_hListViewOrders, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 }
 
