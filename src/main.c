@@ -32,9 +32,6 @@
 #define IDC_LISTVIEW        1006
 #define IDC_STATUS          1007
 #define IDC_EDIT_INSTRUMENT 1008
-#define IDC_BTN_CONNECT_MD  1009
-#define IDC_BTN_SUBSCRIBE   1010
-#define IDC_EDIT_MD_FRONT   1011
 
 HINSTANCE g_hInst;
 HWND g_hMainWnd;
@@ -46,7 +43,6 @@ HWND g_hEditPassword;
 HWND g_hEditFrontAddr;
 HWND g_hEditAuthCode;
 HWND g_hEditInstrument;
-HWND g_hEditMdFront;
 CTPTrader* g_pTrader = NULL;
 
 const char* BROKER_ID = "1010";
@@ -131,17 +127,11 @@ void CreateMainWindow(HWND hWnd, HINSTANCE hInstance) {
                  WS_VISIBLE | WS_CHILD | WS_BORDER | ES_UPPERCASE, 
                  340, 53, 100, 24, hWnd, (HMENU)IDC_EDIT_INSTRUMENT, hInstance, NULL);
     
-    CreateWindow(TEXT("STATIC"), TEXT("行情前置:"), WS_VISIBLE | WS_CHILD, 450, 55, 70, 20, hWnd, NULL, hInstance, NULL);
-    g_hEditMdFront = CreateWindow(TEXT("EDIT"), TEXT("tcp://106.37.101.162:31213"), 
-                 WS_VISIBLE | WS_CHILD | WS_BORDER, 520, 53, 180, 24, hWnd, (HMENU)IDC_EDIT_MD_FRONT, hInstance, NULL);
-    
-    CreateWindow(TEXT("BUTTON"), TEXT("连接行情"), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                 710, 50, 100, 30, hWnd, (HMENU)IDC_BTN_CONNECT_MD, hInstance, NULL);
-    CreateWindow(TEXT("BUTTON"), TEXT("订阅行情"), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                 820, 50, 100, 30, hWnd, (HMENU)IDC_BTN_SUBSCRIBE, hInstance, NULL);
+    CreateWindow(TEXT("BUTTON"), TEXT("查询行情"), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+                 450, 50, 100, 30, hWnd, (HMENU)IDC_BTN_QUERY_MARKET, hInstance, NULL);
     
     CreateWindow(TEXT("BUTTON"), TEXT("查询合约"), WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                 930, 50, 100, 30, hWnd, (HMENU)IDC_BTN_QUERY_INST, hInstance, NULL);
+                 560, 50, 100, 30, hWnd, (HMENU)IDC_BTN_QUERY_INST, hInstance, NULL);
     
     g_hListView = CreateWindowEx(0, WC_LISTVIEW, TEXT(""), WS_VISIBLE | WS_CHILD | WS_BORDER | LVS_REPORT | LVS_SINGLESEL,
                                   10, 90, 1160, 520, hWnd, (HMENU)IDC_LISTVIEW, hInstance, NULL);
@@ -245,58 +235,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         QueryInstrument(g_pTrader, "");
                     } else {
                         UpdateStatus("错误: 请先连接登录");
-                    }
-                    break;
-                case IDC_BTN_CONNECT_MD: {
-                    char brokerID[32], userID[32], password[32], mdFrontAddr[128];
-                    WCHAR wBrokerID[32], wUserID[32], wPassword[32], wMdFrontAddr[128];
-                    
-                    GetWindowText(g_hEditBrokerID, wBrokerID, 32);
-                    GetWindowText(g_hEditUserID, wUserID, 32);
-                    GetWindowText(g_hEditPassword, wPassword, 32);
-                    GetWindowText(g_hEditMdFront, wMdFrontAddr, 128);
-                    
-                    WideCharToMultiByte(CP_ACP, 0, wBrokerID, -1, brokerID, sizeof(brokerID), NULL, NULL);
-                    WideCharToMultiByte(CP_ACP, 0, wUserID, -1, userID, sizeof(userID), NULL, NULL);
-                    WideCharToMultiByte(CP_ACP, 0, wPassword, -1, password, sizeof(password), NULL, NULL);
-                    WideCharToMultiByte(CP_ACP, 0, wMdFrontAddr, -1, mdFrontAddr, sizeof(mdFrontAddr), NULL, NULL);
-                    
-                    UpdateStatus("正在连接行情服务器...");
-                    ConnectMarketData(g_pTrader, brokerID, userID, password, mdFrontAddr);
-                    break;
-                }
-                case IDC_BTN_SUBSCRIBE:
-                    if (g_pTrader && IsMarketDataConnected(g_pTrader)) {
-                        WCHAR instrumentID[32] = {0};
-                        GetWindowText(g_hEditInstrument, instrumentID, 32);
-                        
-                        int len = wcslen(instrumentID);
-                        while (len > 0 && instrumentID[len-1] == L' ') {
-                            instrumentID[--len] = 0;
-                        }
-                        
-                        if (len == 0) {
-                            MessageBox(g_hMainWnd, 
-                                     TEXT("请输入合约代码！\n\n提示：\n1. 先点击\"查询合约\"获取合约列表\n2. 点击选中任意合约行，代码会自动填写\n3. 点击\"订阅行情\"按钮"), 
-                                     TEXT("提示"), 
-                                     MB_ICONINFORMATION | MB_OK);
-                            SetFocus(g_hEditInstrument);
-                        } else {
-                            char ansiInstrumentID[32];
-                            WideCharToMultiByte(CP_ACP, 0, instrumentID, -1, ansiInstrumentID, sizeof(ansiInstrumentID), NULL, NULL);
-                            
-                            char statusMsg[128];
-                            sprintf(statusMsg, "正在订阅合约 %s 的行情...", ansiInstrumentID);
-                            UpdateStatus(statusMsg);
-                            
-                            SubscribeMarketData(g_pTrader, ansiInstrumentID);
-                        }
-                    } else {
-                        UpdateStatus("错误: 请先连接行情服务器");
-                        MessageBox(g_hMainWnd,
-                                 TEXT("请先点击\"连接行情\"按钮连接行情服务器！"),
-                                 TEXT("提示"),
-                                 MB_ICONWARNING | MB_OK);
                     }
                     break;
             }
