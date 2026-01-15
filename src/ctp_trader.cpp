@@ -391,6 +391,58 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
     }
 }
 
+// 判断是否是主力合约的辅助函数
+static bool IsMainContract(const char* instrumentID) {
+    // 提取合约的年月信息
+    // 例如: "IF2601" -> "2601", "CU2602" -> "2602"
+    int len = strlen(instrumentID);
+    if (len < 4) return false;
+    
+    // 查找数字开始的位置
+    int digitStart = -1;
+    for (int i = 0; i < len; i++) {
+        if (instrumentID[i] >= '0' && instrumentID[i] <= '9') {
+            digitStart = i;
+            break;
+        }
+    }
+    
+    if (digitStart == -1 || len - digitStart < 4) return false;
+    
+    // 提取年月部分 (YYMM)
+    char yearMonth[5];
+    strncpy(yearMonth, instrumentID + digitStart, 4);
+    yearMonth[4] = '\0';
+    
+    // 获取当前年月
+    time_t now = time(NULL);
+    struct tm* t = localtime(&now);
+    int currentYear = (t->tm_year + 1900) % 100;  // 取后两位
+    int currentMonth = t->tm_mon + 1;
+    
+    // 解析合约年月
+    int contractYear = (yearMonth[0] - '0') * 10 + (yearMonth[1] - '0');
+    int contractMonth = (yearMonth[2] - '0') * 10 + (yearMonth[3] - '0');
+    
+    // 计算月份差
+    int monthDiff = (contractYear - currentYear) * 12 + (contractMonth - currentMonth);
+    
+    // 主力合约判断规则：
+    // 1. 当月及未来3个月内的合约
+    if (monthDiff >= 0 && monthDiff <= 3) {
+        return true;
+    }
+    
+    // 2. 季月合约 (3, 6, 9, 12月) - 一年内的
+    if (contractMonth == 3 || contractMonth == 6 || contractMonth == 9 || contractMonth == 12) {
+        if (monthDiff >= 0 && monthDiff <= 12) {
+            return true;
+        }
+    }
+    
+    return false;
+}
+
 void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[256];
@@ -444,15 +496,17 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
     if (pInstrument) {
         totalCount++;
         
-        // 过滤：只保存期货合约且未过期的
+        // 过滤：只保存期货合约且未过期的主力合约
         if (pInstrument->ProductClass == '1' && instrumentCount < 2000) {
             time_t now = time(NULL);
             struct tm* t = localtime(&now);
             char today[9];
             sprintf(today, "%04d%02d%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
             
-            // 未过期的合约
-            if (strlen(pInstrument->ExpireDate) > 0 && strcmp(pInstrument->ExpireDate, today) >= 0) {
+            // 未过期的主力合约
+            if (strlen(pInstrument->ExpireDate) > 0 && 
+                strcmp(pInstrument->ExpireDate, today) >= 0 &&
+                IsMainContract(pInstrument->InstrumentID)) {
                 // 保存到数组
                 strcpy(instruments[instrumentCount].instrumentID, pInstrument->InstrumentID);
                 
@@ -507,7 +561,7 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
         
         // 显示统计信息
         char msg[256];
-        sprintf(msg, "合约查询完成，总数: %d，活跃合约: %d，已显示: %d（按到期日排序）", 
+        sprintf(msg, "主力合约查询完成，总合约数: %d，主力合约: %d，已显示: %d（按到期日排序）", 
                 totalCount, instrumentCount, displayCount);
         UpdateStatus(msg);
         
