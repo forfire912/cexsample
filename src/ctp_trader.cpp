@@ -6,29 +6,38 @@
 #include <string.h>
 #include <commctrl.h>
 #include <time.h>
+#include <windows.h> // 确保包含 windows.h
 
-// Helper function to convert UTF-8 string to GBK string
-// Returns a new allocated string that must be deleted by the caller.
-char* Utf8ToGbk(const char* utf8Str) {
-    if (!utf8Str) return NULL;
-
-    // 1. Convert UTF-8 to Wide Char (Unicode)
-    int wideCharLen = MultiByteToWideChar(CP_UTF8, 0, utf8Str, -1, NULL, 0);
-    if (wideCharLen == 0) return NULL;
-    WCHAR* wideCharStr = new WCHAR[wideCharLen];
-    MultiByteToWideChar(CP_UTF8, 0, utf8Str, -1, wideCharStr, wideCharLen);
-
-    // 2. Convert Wide Char (Unicode) to GBK (ACP)
-    int gbkLen = WideCharToMultiByte(CP_ACP, 0, wideCharStr, -1, NULL, 0, NULL, NULL);
-    if (gbkLen == 0) {
-        delete[] wideCharStr;
-        return NULL;
+// Helper function: 将 GBK 编码转换为 UTF-8
+// CTP API 返回的 ErrorMsg 是 GBK 编码，需要转换为 UTF-8
+char* GbkToUtf8(const char* gbkStr) {
+    if (!gbkStr) return NULL;
+    
+    // GBK 转 UNICODE
+    int wlen = MultiByteToWideChar(CP_ACP, 0, gbkStr, -1, NULL, 0);
+    if (wlen == 0) {
+        // 转换失败，返回原字符串副本
+        int len = strlen(gbkStr) + 1;
+        char* result = new char[len];
+        strcpy(result, gbkStr);
+        return result;
     }
-    char* gbkStr = new char[gbkLen];
-    WideCharToMultiByte(CP_ACP, 0, wideCharStr, -1, gbkStr, gbkLen, NULL, NULL);
+    
+    WCHAR* wStr = new WCHAR[wlen];
+    MultiByteToWideChar(CP_ACP, 0, gbkStr, -1, wStr, wlen);
+    
+    // UNICODE 转 UTF-8
+    int utf8Len = WideCharToMultiByte(CP_UTF8, 0, wStr, -1, NULL, 0, NULL, NULL);
+    char* utf8Str = new char[utf8Len];
+    WideCharToMultiByte(CP_UTF8, 0, wStr, -1, utf8Str, utf8Len, NULL, NULL);
+    
+    delete[] wStr;
+    return utf8Str;
+}
 
-    delete[] wideCharStr;
-    return gbkStr;
+// 兼容旧代码，重定向到 GbkToUtf8
+char* Utf8ToGbk(const char* str) {
+    return GbkToUtf8(str);
 }
 
 void LogMessage(const char* msg) {
@@ -77,7 +86,10 @@ public:
     }
     
     void UpdateStatus(const char* msg) {
-        if (statusCallback) { statusCallback(msg); }
+        if (statusCallback) {
+            // 直接传递 UTF-8 编码的消息，由 main.c 的 UpdateStatus 统一处理
+            statusCallback(msg);
+        }
     }
     
     void ClearListView() {
@@ -98,11 +110,13 @@ public:
         SendMessage(hListView, LVM_INSERTCOLUMNW, col, (LPARAM)&lvc);
     }
     
-    // This function now assumes the input text is always GBK (CP_ACP)
+    // 统一添加列表项的函数
+    // 输入的文本应该是 UTF-8 编码（源文件和 CTP 消息都已转为 UTF-8）
     void AddItem(int row, int col, const char* text) {
         if (!hListView) return;
         WCHAR wtext[256];
-        MultiByteToWideChar(CP_ACP, 0, text, -1, wtext, 256);
+        // 使用 CP_UTF8 转换，因为现在所有字符串都是 UTF-8 编码
+        MultiByteToWideChar(CP_UTF8, 0, text, -1, wtext, 256);
         if (col == 0) {
             LVITEMW lvi = {0};
             lvi.mask = LVIF_TEXT;
@@ -174,12 +188,38 @@ public:
         char msg[256];
         sprintf(msg, "登录成功！交易日: %s", pRspUserLogin ? pRspUserLogin->TradingDay : "未知");
         UpdateStatus(msg);
+        
+        // 登录成功后，自动确认结算结果
+        CThostFtdcSettlementInfoConfirmField req = {0};
+        strcpy(req.BrokerID, brokerID);
+        strcpy(req.InvestorID, userID);
+        pUserApi->ReqSettlementInfoConfirm(&req, ++requestID);
+    }
+    
+    virtual void OnRspSettlementInfoConfirm(CThostFtdcSettlementInfoConfirmField *pSettlementInfoConfirm, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
+        if (pRspInfo && pRspInfo->ErrorID != 0) {
+            char msg[256];
+            char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+            sprintf(msg, "结算单确认失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+            UpdateStatus(msg);
+            if (gbkErrorMsg) delete[] gbkErrorMsg;
+        } else {
+            UpdateStatus("结算单确认成功，可以开始交易。");
+        }
     }
     
     virtual void OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast);
     virtual void OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInvestorPosition, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast);
     virtual void OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMarketData, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast);
     virtual void OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast);
+    
+    // 交易相关回调
+    virtual void OnRspOrderInsert(CThostFtdcInputOrderField *pInputOrder, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast);
+    virtual void OnRspOrderAction(CThostFtdcInputOrderActionField *pInputOrderAction, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast);
+    virtual void OnRtnOrder(CThostFtdcOrderField *pOrder);
+    virtual void OnRtnTrade(CThostFtdcTradeField *pTrade);
+    virtual void OnErrRtnOrderInsert(CThostFtdcInputOrderField *pInputOrder, CThostFtdcRspInfoField *pRspInfo);
+    virtual void OnErrRtnOrderAction(CThostFtdcOrderActionField *pOrderAction, CThostFtdcRspInfoField *pRspInfo);
 };
 
 void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
@@ -212,14 +252,9 @@ void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoFie
         AddItem(row, 0, pOrder->InsertTime);
         AddItem(row, 1, pOrder->InstrumentID);
         
-        // Convert UTF-8 literals to GBK
-        char* dir = Utf8ToGbk(pOrder->Direction == '0' ? "买" : "卖");
-        AddItem(row, 2, dir ? dir : "");
-        if (dir) delete[] dir;
-        
-        char* offset = Utf8ToGbk(pOrder->CombOffsetFlag[0] == '0' ? "开" : "平");
-        AddItem(row, 3, offset ? offset : "");
-        if (offset) delete[] offset;
+        // 直接使用 UTF-8 字符串常量
+        AddItem(row, 2, pOrder->Direction == '0' ? "买" : "卖");
+        AddItem(row, 3, pOrder->CombOffsetFlag[0] == '0' ? "开" : "平");
         
         sprintf(buf, "%.2f", pOrder->LimitPrice);
         AddItem(row, 4, buf);
@@ -228,8 +263,11 @@ void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoFie
         sprintf(buf, "%d", pOrder->VolumeTraded);
         AddItem(row, 6, buf);
         
-        // StatusMsg is already GBK from CTP API
-        AddItem(row, 7, pOrder->StatusMsg);
+        // StatusMsg 来自 CTP API，是 GBK 编码，需要转换为 UTF-8
+        char* utf8Status = GbkToUtf8(pOrder->StatusMsg);
+        AddItem(row, 7, utf8Status ? utf8Status : pOrder->StatusMsg);
+        if (utf8Status) delete[] utf8Status;
+        
         AddItem(row, 8, "");
         row++;
     }
@@ -269,10 +307,8 @@ void TraderSpi::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInves
         char buf[256];
         AddItem(row, 0, pInvestorPosition->InstrumentID);
         
-        // Convert UTF-8 literals to GBK
-        char* posDir = Utf8ToGbk(pInvestorPosition->PosiDirection == '2' ? "多" : "空");
-        AddItem(row, 1, posDir ? posDir : "");
-        if (posDir) delete[] posDir;
+        // 直接使用 UTF-8 字符串常量
+        AddItem(row, 1, pInvestorPosition->PosiDirection == '2' ? "多" : "空");
         
         sprintf(buf, "%d", pInvestorPosition->Position);
         AddItem(row, 2, buf);
@@ -419,7 +455,17 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
             if (strlen(pInstrument->ExpireDate) > 0 && strcmp(pInstrument->ExpireDate, today) >= 0) {
                 // 保存到数组
                 strcpy(instruments[instrumentCount].instrumentID, pInstrument->InstrumentID);
-                strcpy(instruments[instrumentCount].instrumentName, pInstrument->InstrumentName);
+                
+                // 转换合约名称从 GBK 到 UTF-8
+                char* utf8Name = GbkToUtf8(pInstrument->InstrumentName);
+                if (utf8Name) {
+                    strncpy(instruments[instrumentCount].instrumentName, utf8Name, 60);
+                    instruments[instrumentCount].instrumentName[60] = '\0';
+                    delete[] utf8Name;
+                } else {
+                    strcpy(instruments[instrumentCount].instrumentName, pInstrument->InstrumentName);
+                }
+                
                 strcpy(instruments[instrumentCount].exchangeID, pInstrument->ExchangeID);
                 strcpy(instruments[instrumentCount].productID, pInstrument->ProductID);
                 instruments[instrumentCount].volumeMultiple = pInstrument->VolumeMultiple;
@@ -468,6 +514,104 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
         // 清理内存
         delete[] instruments;
         instruments = NULL;
+    }
+}
+
+// 报单响应
+void TraderSpi::OnRspOrderInsert(CThostFtdcInputOrderField *pInputOrder, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
+    if (pRspInfo && pRspInfo->ErrorID != 0) {
+        char msg[512];
+        char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+        sprintf(msg, "报单失败: ErrorID=%d, %s", pRspInfo->ErrorID, gbkErrorMsg ? gbkErrorMsg : "");
+        UpdateStatus(msg);
+        LogMessage(msg);
+        if (gbkErrorMsg) delete[] gbkErrorMsg;
+    } else {
+        char msg[256];
+        sprintf(msg, "报单请求已提交: %s", pInputOrder ? pInputOrder->InstrumentID : "");
+        UpdateStatus(msg);
+        LogMessage(msg);
+    }
+}
+
+// 撤单响应
+void TraderSpi::OnRspOrderAction(CThostFtdcInputOrderActionField *pInputOrderAction, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast) {
+    if (pRspInfo && pRspInfo->ErrorID != 0) {
+        char msg[512];
+        char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+        sprintf(msg, "撤单失败: ErrorID=%d, %s", pRspInfo->ErrorID, gbkErrorMsg ? gbkErrorMsg : "");
+        UpdateStatus(msg);
+        LogMessage(msg);
+        if (gbkErrorMsg) delete[] gbkErrorMsg;
+    } else {
+        char msg[256];
+        sprintf(msg, "撤单请求已提交");
+        UpdateStatus(msg);
+        LogMessage(msg);
+    }
+}
+
+// 报单回报
+void TraderSpi::OnRtnOrder(CThostFtdcOrderField *pOrder) {
+    if (!pOrder) return;
+    
+    // StatusMsg 来自 CTP API，是 GBK 编码，需要转换
+    char* utf8Status = GbkToUtf8(pOrder->StatusMsg);
+    
+    char msg[512];
+    sprintf(msg, "报单回报: %s %s %s, 价格:%.2f, 数量:%d, 状态:%s", 
+            pOrder->InstrumentID,
+            pOrder->Direction == '0' ? "买" : "卖",
+            pOrder->CombOffsetFlag[0] == '0' ? "开仓" : "平仓",
+            pOrder->LimitPrice,
+            pOrder->VolumeTotalOriginal,
+            utf8Status ? utf8Status : pOrder->StatusMsg);
+    
+    UpdateStatus(msg);
+    LogMessage(msg);
+    
+    if (utf8Status) delete[] utf8Status;
+}
+
+// 成交回报
+void TraderSpi::OnRtnTrade(CThostFtdcTradeField *pTrade) {
+    if (!pTrade) return;
+    
+    char msg[512];
+    sprintf(msg, "成交回报: %s %s %s, 价格:%.2f, 数量:%d, 时间:%s", 
+            pTrade->InstrumentID,
+            pTrade->Direction == '0' ? "买" : "卖",
+            pTrade->OffsetFlag == '0' ? "开仓" : "平仓",
+            pTrade->Price,
+            pTrade->Volume,
+            pTrade->TradeTime);
+    
+    UpdateStatus(msg);
+    UpdateStatus(msg);
+    LogMessage(msg);
+}
+
+// 报单录入错误回报
+void TraderSpi::OnErrRtnOrderInsert(CThostFtdcInputOrderField *pInputOrder, CThostFtdcRspInfoField *pRspInfo) {
+    if (pRspInfo) {
+        char msg[512];
+        char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+        sprintf(msg, "报单错误: ErrorID=%d, %s", pRspInfo->ErrorID, gbkErrorMsg ? gbkErrorMsg : "");
+        UpdateStatus(msg);
+        LogMessage(msg);
+        if (gbkErrorMsg) delete[] gbkErrorMsg;
+    }
+}
+
+// 撤单操作错误回报
+void TraderSpi::OnErrRtnOrderAction(CThostFtdcOrderActionField *pOrderAction, CThostFtdcRspInfoField *pRspInfo) {
+    if (pRspInfo) {
+        char msg[512];
+        char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+        sprintf(msg, "撤单错误: ErrorID=%d, %s", pRspInfo->ErrorID, gbkErrorMsg ? gbkErrorMsg : "");
+        UpdateStatus(msg);
+        LogMessage(msg);
+        if (gbkErrorMsg) delete[] gbkErrorMsg;
     }
 }
 
@@ -645,4 +789,81 @@ extern "C" int QueryInstrument(CTPTrader* trader, const char* instrumentID) {
     if (instrumentID && strlen(instrumentID) > 0) { strcpy(req.InstrumentID, instrumentID); }
     Sleep(1000);
     return trader->pSpi->pUserApi->ReqQryInstrument(&req, ++trader->pSpi->requestID);
+}
+
+extern "C" int SendOrder(CTPTrader* trader, const char* instrumentID, char direction, 
+                         char offsetFlag, double price, int volume) {
+    if (!trader || !trader->pSpi || !trader->pSpi->pUserApi) return -1;
+    if (!trader->pSpi->isLoggedIn) return -2;
+    
+    CThostFtdcInputOrderField req = {0};
+    strcpy(req.BrokerID, trader->pSpi->brokerID);
+    strcpy(req.InvestorID, trader->pSpi->userID);
+    strcpy(req.InstrumentID, instrumentID);
+    
+    // 生成报单引用
+    static int orderRef = 0;
+    sprintf(req.OrderRef, "%d", ++orderRef);
+    
+    req.Direction = direction;  // '0'=买, '1'=卖
+    req.CombOffsetFlag[0] = offsetFlag;  // '0'=开仓, '1'=平仓, '3'=平今, '4'=平昨
+    req.CombHedgeFlag[0] = '1';  // 投机
+    req.LimitPrice = price;
+    req.VolumeTotalOriginal = volume;
+    
+    // 限价单
+    req.OrderPriceType = THOST_FTDC_OPT_LimitPrice;
+    req.TimeCondition = THOST_FTDC_TC_GFD;  // 当日有效
+    req.VolumeCondition = THOST_FTDC_VC_AV;  // 任意数量
+    req.MinVolume = 1;
+    req.ContingentCondition = THOST_FTDC_CC_Immediately;  // 立即
+    req.ForceCloseReason = THOST_FTDC_FCC_NotForceClose;  // 非强平
+    req.IsAutoSuspend = 0;
+    req.UserForceClose = 0;
+    
+    char logMsg[512];
+    sprintf(logMsg, "SendOrder: %s, Direction=%c, Offset=%c, Price=%.2f, Volume=%d",
+            instrumentID, direction, offsetFlag, price, volume);
+    LogMessage(logMsg);
+    
+    int ret = trader->pSpi->pUserApi->ReqOrderInsert(&req, ++trader->pSpi->requestID);
+    
+    sprintf(logMsg, "ReqOrderInsert returned: %d", ret);
+    LogMessage(logMsg);
+    
+    return ret;
+}
+
+extern "C" int CancelOrder(CTPTrader* trader, const char* orderRef, const char* exchangeID, 
+                           const char* orderSysID) {
+    if (!trader || !trader->pSpi || !trader->pSpi->pUserApi) return -1;
+    if (!trader->pSpi->isLoggedIn) return -2;
+    
+    CThostFtdcInputOrderActionField req = {0};
+    strcpy(req.BrokerID, trader->pSpi->brokerID);
+    strcpy(req.InvestorID, trader->pSpi->userID);
+    
+    if (orderRef && strlen(orderRef) > 0) {
+        strcpy(req.OrderRef, orderRef);
+    }
+    if (exchangeID && strlen(exchangeID) > 0) {
+        strcpy(req.ExchangeID, exchangeID);
+    }
+    if (orderSysID && strlen(orderSysID) > 0) {
+        strcpy(req.OrderSysID, orderSysID);
+    }
+    
+    req.ActionFlag = THOST_FTDC_AF_Delete;  // 删除
+    
+    char logMsg[256];
+    sprintf(logMsg, "CancelOrder: OrderRef=%s, Exchange=%s, OrderSysID=%s",
+            orderRef ? orderRef : "", exchangeID ? exchangeID : "", orderSysID ? orderSysID : "");
+    LogMessage(logMsg);
+    
+    int ret = trader->pSpi->pUserApi->ReqOrderAction(&req, ++trader->pSpi->requestID);
+    
+    sprintf(logMsg, "ReqOrderAction returned: %d", ret);
+    LogMessage(logMsg);
+    
+    return ret;
 }

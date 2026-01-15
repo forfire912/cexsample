@@ -36,6 +36,14 @@ int QueryPositions(CTPTrader* trader);
 int QueryMarketData(CTPTrader* trader, const char* instrumentID);
 int QueryInstrument(CTPTrader* trader, const char* instrumentID);
 
+// 交易功能
+// direction: '0'=买, '1'=卖
+// offsetFlag: '0'=开仓, '1'=平仓, '3'=平今, '4'=平昨
+int SendOrder(CTPTrader* trader, const char* instrumentID, char direction, 
+              char offsetFlag, double price, int volume);
+int CancelOrder(CTPTrader* trader, const char* orderRef, const char* exchangeID, 
+                const char* orderSysID);
+
 #ifdef __cplusplus
 }
 #endif
