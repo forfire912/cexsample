@@ -22,7 +22,8 @@ if not exist "bin\CTP_Trader.exe" (
 )
 
 echo Starting CTP_Trader.exe...
-start "" "bin\CTP_Trader.exe"
+powershell -NoProfile -WindowStyle Hidden -Command ^
+  "Start-Process -FilePath 'bin\\CTP_Trader.exe' -WorkingDirectory 'bin'"
 timeout /t 2 /nobreak >nul
 
 if not exist "bin\CTP_Trader.exe" (

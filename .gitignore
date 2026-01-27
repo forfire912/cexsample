@@ -14,3 +14,7 @@ flow/
 # 临时文件
 *.tmp
 *~
+
+export/
+mdflow/
+bin/
