@@ -117,9 +117,28 @@ static void GetTodayYYYYMMDD(char* buf, size_t len) {
     sprintf(buf, "%04d%02d%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
 }
 
+static void GetNowYYYYMMDDHHMMSS(char* buf, size_t len) {
+    if (!buf || len < 15) return;
+    time_t now = time(NULL);
+    struct tm* t = localtime(&now);
+    sprintf(buf, "%04d%02d%02d%02d%02d%02d",
+            t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+            t->tm_hour, t->tm_min, t->tm_sec);
+}
+
 static void EnsureDir(const char* path) {
     if (!path || !path[0]) return;
     _mkdir(path);
+}
+
+// 校验日期字符串是否是8位数字 (YYYYMMDD)
+static bool IsValidDate8(const char* s) {
+    if (!s) return false;
+    for (int i = 0; i < 8; ++i) {
+        if (s[i] == '\0') return false;
+        if (s[i] < '0' || s[i] > '9') return false;
+    }
+    return s[8] == '\0' || s[8] == '\r' || s[8] == '\n';
 }
 
 static std::wstring Utf8ToWide(const char* s) {
@@ -371,45 +390,32 @@ public:
     
     void ExportOrdersIfReady() {
         if (orderHeaders.empty()) return;
-        char dateStr[9];
-        if (!orderTradingDay.empty()) {
-            strncpy(dateStr, orderTradingDay.c_str(), sizeof(dateStr));
-            dateStr[8] = '\0';
-        } else {
-            GetTodayYYYYMMDD(dateStr, sizeof(dateStr));
-        }
-        ExportCsv(userID, "委托", dateStr, orderHeaders, orderRows);
+        char datetimeStr[15];
+        GetNowYYYYMMDDHHMMSS(datetimeStr, sizeof(datetimeStr));
+        ExportCsv(userID, "委托", datetimeStr, orderHeaders, orderRows);
     }
     
     void ExportPositionsIfReady() {
         if (positionHeaders.empty()) return;
-        char dateStr[9];
-        if (!positionTradingDay.empty()) {
-            strncpy(dateStr, positionTradingDay.c_str(), sizeof(dateStr));
-            dateStr[8] = '\0';
-        } else {
-            GetTodayYYYYMMDD(dateStr, sizeof(dateStr));
-        }
-        ExportCsv(userID, "持仓", dateStr, positionHeaders, positionRows);
+        char datetimeStr[15];
+        GetNowYYYYMMDDHHMMSS(datetimeStr, sizeof(datetimeStr));
+        ExportCsv(userID, "持仓", datetimeStr, positionHeaders, positionRows);
     }
     
     void ExportMarketIfReady() {
         if (marketHeaders.empty()) return;
-        char dateStr[9];
-        if (!marketTradingDay.empty()) {
-            strncpy(dateStr, marketTradingDay.c_str(), sizeof(dateStr));
-            dateStr[8] = '\0';
-        } else {
-            GetTodayYYYYMMDD(dateStr, sizeof(dateStr));
-        }
-        ExportCsv(userID, "行情", dateStr, marketHeaders, marketRows);
+        // 使用当前时间戳到秒，避免同日多次导出文件覆盖
+        char datetimeStr[15];
+        GetNowYYYYMMDDHHMMSS(datetimeStr, sizeof(datetimeStr));
+        ExportCsv(userID, "行情", datetimeStr, marketHeaders, marketRows);
     }
     
-    void ExportInstrumentIfReady() {
+    void ExportInstrumentIfReady(bool isOption) {
         if (instrumentHeaders.empty()) return;
-        char dateStr[9];
-        GetTodayYYYYMMDD(dateStr, sizeof(dateStr));
-        ExportCsv(userID, "合约", dateStr, instrumentHeaders, instrumentRows);
+        char datetimeStr[15];
+        GetNowYYYYMMDDHHMMSS(datetimeStr, sizeof(datetimeStr));
+        const char* contentName = isOption ? "期权" : "合约";
+        ExportCsv(userID, contentName, datetimeStr, instrumentHeaders, instrumentRows);
     }
     
     void ClearListView() {
@@ -995,8 +1001,15 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
         AddItem(row, col++, buf);
         rowData.push_back(buf);
 
-        if (tradingDay[0] != '\0') {
+        // 优先使用有效交易日，其次业务日，最后回退今天日期，避免文件名日期异常
+        if (IsValidDate8(tradingDay)) {
             marketTradingDay = tradingDay;
+        } else if (IsValidDate8(actionDay)) {
+            marketTradingDay = actionDay;
+        } else if (marketTradingDay.empty()) {
+            char today[9];
+            GetTodayYYYYMMDD(today, sizeof(today));
+            marketTradingDay = today;
         }
         marketRows.push_back(rowData);
         row++;
@@ -1382,7 +1395,7 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
         sprintf(msg, "主力合约查询完成，总合约数: %d，主力合约: %d，已显示: %d（按到期日排序）", 
                 totalCount, instrumentCount, displayCount);
         UpdateStatus(msg);
-        ExportInstrumentIfReady();
+        ExportInstrumentIfReady(isOptionQuery);
         EndQuery(4);
         
         // 清理内存
