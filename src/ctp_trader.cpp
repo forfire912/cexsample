@@ -1657,6 +1657,32 @@ extern "C" void DestroyCTPTrader(CTPTrader* trader) {
     }
 }
 
+extern "C" void Disconnect(CTPTrader* trader) {
+    if (!trader) return;
+    if (trader->pMdApi) {
+        trader->pMdApi->RegisterSpi(NULL);
+        trader->pMdApi->Release();
+        trader->pMdApi = NULL;
+    }
+    if (trader->pMdSpi) {
+        trader->pMdSpi->pMdApi = NULL;
+        trader->pMdSpi->isConnected = false;
+        trader->pMdSpi->isLoggedIn = false;
+    }
+    if (trader->pSpi) {
+        if (trader->pSpi->pUserApi) {
+            trader->pSpi->pUserApi->RegisterSpi(NULL);
+            trader->pSpi->pUserApi->Release();
+            trader->pSpi->pUserApi = NULL;
+        }
+        trader->pSpi->isConnected = false;
+        trader->pSpi->isAuthenticated = false;
+        trader->pSpi->isLoggedIn = false;
+        trader->pSpi->UpdateStatus("?????");
+    }
+}
+
+
 extern "C" void SetMainWindow(CTPTrader* trader, HWND hMainWnd) {
     if (!trader) return;
     trader->hMainWnd = hMainWnd;

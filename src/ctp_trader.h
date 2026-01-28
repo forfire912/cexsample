@@ -36,6 +36,9 @@ void DestroyCTPTrader(CTPTrader* trader);
 // Provide main window handle for async UI updates (WM_APP_MD_UPDATE).
 void SetMainWindow(CTPTrader* trader, HWND hMainWnd);
 
+// ???????API
+void Disconnect(CTPTrader* trader);
+
 // 设置ListView控件
 void SetListView(CTPTrader* trader, HWND hListView);
 
