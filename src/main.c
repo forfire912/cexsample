@@ -418,21 +418,47 @@ static BOOL ImportInstrumentsFromExcel(HWND owner) {
 
 static BOOL TryGetListViewPrice(const WCHAR* instrument, double* outPrice) {
     if (!g_hListViewQuery || !instrument || !outPrice) return FALSE;
+    int instCol = 1;  // left 2nd column
+    int priceCol = 8; // left 9th column
     WCHAR want[64] = {0};
     wcsncpy(want, instrument, _countof(want) - 1);
     want[_countof(want) - 1] = 0;
     TrimInPlaceW(want);
     CharUpperBuffW(want, (DWORD)wcslen(want));
     if (want[0] == 0) return FALSE;
+
+    WCHAR wantNorm[64] = {0};
+    int wn = 0;
+    for (int i = 0; want[i] && wn < (int)_countof(wantNorm) - 1; i++) {
+        if ((want[i] >= L'0' && want[i] <= L'9') || (want[i] >= L'A' && want[i] <= L'Z')) {
+            wantNorm[wn++] = want[i];
+        }
+    }
+    wantNorm[wn] = 0;
+    if (wantNorm[0] == 0) return FALSE;
     int itemCount = ListView_GetItemCount(g_hListViewQuery);
     for (int i = 0; i < itemCount; i++) {
         WCHAR instBuf[64] = {0};
-        ListView_GetItemText(g_hListViewQuery, i, 0, instBuf, _countof(instBuf));
+        ListView_GetItemText(g_hListViewQuery, i, instCol, instBuf, _countof(instBuf));
         TrimInPlaceW(instBuf);
         CharUpperBuffW(instBuf, (DWORD)wcslen(instBuf));
-        if (wcscmp(instBuf, want) == 0) {
+
+        WCHAR instNorm[64] = {0};
+        int in = 0;
+        for (int j = 0; instBuf[j] && in < (int)_countof(instNorm) - 1; j++) {
+            if ((instBuf[j] >= L'0' && instBuf[j] <= L'9') || (instBuf[j] >= L'A' && instBuf[j] <= L'Z')) {
+                instNorm[in++] = instBuf[j];
+            }
+        }
+        instNorm[in] = 0;
+
+        if (instNorm[0] == 0) {
+            continue;
+        }
+
+        if (wcsstr(instNorm, wantNorm) != NULL || wcsstr(wantNorm, instNorm) != NULL) {
             WCHAR priceBuf[64] = {0};
-            ListView_GetItemText(g_hListViewQuery, i, 1, priceBuf, _countof(priceBuf));
+            ListView_GetItemText(g_hListViewQuery, i, priceCol, priceBuf, _countof(priceBuf));
             TrimInPlaceW(priceBuf);
             if (wcscmp(priceBuf, L"--") == 0) return FALSE;
             if (priceBuf[0] == 0) return FALSE;
