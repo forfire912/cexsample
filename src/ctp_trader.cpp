@@ -12,6 +12,8 @@
 #include <direct.h>
 #include <fstream>
 #include <string>
+#include <cmath>
+#include <cfloat>
 #include <vector>
 
 // Helper function: 将 GBK 编码转换为 UTF-8
@@ -63,6 +65,10 @@ static void FormatInt64(char* buf, long long v) {
 
 static void FormatDouble(char* buf, double v, int precision) {
     if (!buf) return;
+    if (!std::isfinite(v) || v >= DBL_MAX / 10) {
+        strcpy(buf, "--");
+        return;
+    }
     char fmt[8];
     sprintf(fmt, "%%.%df", precision);
     sprintf(buf, fmt, v);
@@ -335,16 +341,28 @@ public:
             char msg[256];
             size_t sent = currentIndex + 1;
             size_t remaining = total - sent;
-            sprintf(msg, "行情查询进度: %zu/%zu (剩余 %zu) 合约=%s", sent, total, remaining, inst.c_str());
+            sprintf(msg, "行情查询请求发送失败，跳过合约=%s", inst.c_str());
             UpdateStatus(msg);
         }
         int ret = pUserApi->ReqQryDepthMarketData(&req, ++requestID);
         if (ret != 0) {
-            char msg[256];
-            sprintf(msg, "琛屾儏鏌ヨ璇锋眰鍙戦€佸け璐? %s", inst.c_str());
-            UpdateStatus(msg);
+            for (int i = 0; i < 3 && ret != 0; i++) {
+                Sleep(200);
+                ret = pUserApi->ReqQryDepthMarketData(&req, ++requestID);
+            }
         }
-        return ret;
+        if (ret != 0) {
+            char msg[256];
+            sprintf(msg, "???????????????=%s", inst.c_str());
+            UpdateStatus(msg);
+            if (HasPendingMarketQuery()) {
+                return SendNextMarketQuery();
+            }
+            ClearMarketQueryQueue();
+            EndQuery(3);
+            return 0;
+        }
+        return 0;
     }
 
     int StartMarketQueryBatch(const std::vector<std::string>& instruments) {
@@ -2045,7 +2063,6 @@ extern "C" int CancelOrder(CTPTrader* trader, const char* orderRef, const char* 
     
     return ret;
 }
-
 
 
 

@@ -49,7 +49,7 @@ if (Test-Path $vswhere) {
             
             # Link
             Write-Host "[4/4] Linking..." -ForegroundColor Yellow
-            $cmd3 = "call `"$vcvars`" && link /nologo /SUBSYSTEM:WINDOWS /OUT:bin\CTP_Trader.exe obj\main.obj obj\ctp_trader.obj api\allapi\thosttraderapi_se.lib api\allapi\thostmduserapi_se.lib user32.lib gdi32.lib comctl32.lib ws2_32.lib"
+            $cmd3 = "call `"$vcvars`" && link /nologo /SUBSYSTEM:WINDOWS /OUT:bin\CTP_Trader.exe obj\main.obj obj\ctp_trader.obj api\allapi\thosttraderapi_se.lib api\allapi\thostmduserapi_se.lib user32.lib gdi32.lib comctl32.lib comdlg32.lib ole32.lib oleaut32.lib ws2_32.lib"
             $result3 = cmd /c $cmd3 2>&1
             Write-Host $result3
             
