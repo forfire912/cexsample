@@ -15,14 +15,43 @@
 #include <cmath>
 #include <cfloat>
 #include <vector>
+#include <map>
+#include <ctype.h>
+
+static int g_queryMaxRecords = 100;
+
+static int ClampQueryMaxRecords(int value) {
+    if (value < 1) return 1;
+    if (value > 10000) return 10000;
+    return value;
+}
+
+extern "C" void SetQueryMaxRecords(int maxRecords) {
+    g_queryMaxRecords = ClampQueryMaxRecords(maxRecords);
+}
+
+static int GetQueryMaxRecords() {
+    return g_queryMaxRecords;
+}
+
+static void NormalizeInstrumentId(std::string& s) {
+    for (size_t i = 0; i < s.size(); ++i) {
+        unsigned char c = (unsigned char)s[i];
+        if (c >= 'A' && c <= 'Z') {
+            s[i] = (char)tolower(c);
+        }
+    }
+}
 
 // Helper function: 将 GBK 编码转换为 UTF-8
 // CTP API 返回的 ErrorMsg 是 GBK 编码，需要转换为 UTF-8
+// 编码转换：将 CTP 返回的 GBK 字符串转换为 UTF-8
 char* GbkToUtf8(const char* gbkStr) {
     if (!gbkStr) return NULL;
     
     // GBK 转 UNICODE
     int wlen = MultiByteToWideChar(CP_ACP, 0, gbkStr, -1, NULL, 0);
+    // 转换失败则返回原字符串副本
     if (wlen == 0) {
         // 转换失败，返回原字符串副本
         int len = strlen(gbkStr) + 1;
@@ -44,10 +73,12 @@ char* GbkToUtf8(const char* gbkStr) {
 }
 
 // 兼容旧代码，重定向到 GbkToUtf8
+// 兼容旧接口：保持函数名但内部走统一转换
 char* Utf8ToGbk(const char* str) {
     return GbkToUtf8(str);
 }
 
+// 格式化辅助：char -> C 字符串
 static void FormatChar(char* buf, char v) {
     if (!buf) return;
     if (v == 0) {
@@ -58,11 +89,13 @@ static void FormatChar(char* buf, char v) {
     buf[1] = '\0';
 }
 
+// 格式化辅助：64 位整数 -> 字符串
 static void FormatInt64(char* buf, long long v) {
     if (!buf) return;
     sprintf(buf, "%lld", v);
 }
 
+// 格式化辅助：浮点数 -> 字符串（处理 NaN/无效值）
 static void FormatDouble(char* buf, double v, int precision) {
     if (!buf) return;
     if (!std::isfinite(v) || v >= DBL_MAX / 10) {
@@ -82,6 +115,7 @@ static int SafeStrnlen(const char* s, int maxLen) {
     return maxLen;
 }
 
+// 安全拷贝：固定长度字段 -> C 字符串
 static void CopyFixedField(char* dst, size_t dstSize, const char* src, size_t srcSize) {
     if (!dst || dstSize == 0) return;
     dst[0] = '\0';
@@ -94,6 +128,7 @@ static void CopyFixedField(char* dst, size_t dstSize, const char* src, size_t sr
 }
 
 
+// CSV 转义：处理逗号/引号/换行
 static std::string CsvEscape(const std::string& s) {
     bool needQuotes = false;
     std::string out;
@@ -116,6 +151,7 @@ static std::string CsvEscape(const std::string& s) {
     return out;
 }
 
+// 获取当前日期（YYYYMMDD）
 static void GetTodayYYYYMMDD(char* buf, size_t len) {
     if (!buf || len < 9) return;
     time_t now = time(NULL);
@@ -123,6 +159,7 @@ static void GetTodayYYYYMMDD(char* buf, size_t len) {
     sprintf(buf, "%04d%02d%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
 }
 
+// 获取当前时间（YYYYMMDDHHMMSS）
 static void GetNowYYYYMMDDHHMMSS(char* buf, size_t len) {
     if (!buf || len < 15) return;
     time_t now = time(NULL);
@@ -138,6 +175,7 @@ static void EnsureDir(const char* path) {
 }
 
 // 校验日期字符串是否是8位数字 (YYYYMMDD)
+// 校验日期字符串（YYYYMMDD）是否合法
 static bool IsValidDate8(const char* s) {
     if (!s) return false;
     for (int i = 0; i < 8; ++i) {
@@ -147,8 +185,10 @@ static bool IsValidDate8(const char* s) {
     return s[8] == '\0' || s[8] == '\r' || s[8] == '\n';
 }
 
+// UTF-8 转宽字符串（用于 Windows 宽接口）
 static std::wstring Utf8ToWide(const char* s) {
     if (!s) return std::wstring();
+// 按 UTF-8 转换
     int wlen = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
     if (wlen <= 0) return std::wstring();
     std::wstring ws;
@@ -157,6 +197,7 @@ static std::wstring Utf8ToWide(const char* s) {
     return ws;
 }
 
+// 导出 CSV：写入 BOM + 表头 + 数据行
 static void ExportCsv(const char* userID, const char* contentName, const char* dateStr,
                       const std::vector<std::string>& headers,
                       const std::vector< std::vector<std::string> >& rows) {
@@ -166,9 +207,11 @@ static void ExportCsv(const char* userID, const char* contentName, const char* d
     char nameUtf8[260];
     sprintf(nameUtf8, "export\\%s_%s_%s.csv", userID, contentName, dateStr);
     std::wstring wpath = Utf8ToWide(nameUtf8);
+    // 使用宽路径打开文件（UTF-8 转宽字符）
     FILE* f = _wfopen(wpath.c_str(), L"wb");
     if (!f) return;
     // UTF-8 BOM for Excel compatibility
+    // 写入 UTF-8 BOM，提升 Excel 兼容性
     const unsigned char bom[3] = {0xEF, 0xBB, 0xBF};
     fwrite(bom, 1, 3, f);
     // header
@@ -193,6 +236,7 @@ static void ExportCsv(const char* userID, const char* contentName, const char* d
     fclose(f);
 }
 
+// 写入调试日志到 ctp_debug.log
 void LogMessage(const char* msg) {
     FILE* f = fopen("ctp_debug.log", "a");
     if (f) {
@@ -204,8 +248,10 @@ void LogMessage(const char* msg) {
     }
 }
 
+// 交易 SPI：处理交易通道回调与查询逻辑
 class TraderSpi : public CThostFtdcTraderSpi {
 public:
+    // 交易 API 句柄与 UI/状态回调
     CThostFtdcTraderApi* pUserApi;
     HWND hListView;
     StatusCallback statusCallback;
@@ -226,6 +272,7 @@ public:
     CRITICAL_SECTION queryLock;
     CRITICAL_SECTION listViewLock;
     
+    // 导出缓存：委托/持仓/行情/合约
     std::vector<std::string> orderHeaders;
     std::vector< std::vector<std::string> > orderRows;
     std::string orderTradingDay;
@@ -245,7 +292,12 @@ public:
     size_t marketQueryIndex;
     bool marketBatchActive;
     int marketBatchStartRequestID;
+    ULONGLONG lastMarketQueryTick;
+    bool marketBatchCleared;
+    std::map<int, std::string> marketReqMap;
+    int marketRowIndex;
     
+    // 初始化 SPI 状态与同步对象
     TraderSpi() {
         pUserApi = NULL;
         hListView = NULL;
@@ -262,6 +314,10 @@ public:
         marketQueryIndex = 0;
         marketBatchActive = false;
         marketBatchStartRequestID = 0;
+        lastMarketQueryTick = 0;
+        marketBatchCleared = false;
+        marketReqMap.clear();
+        marketRowIndex = 0;
         memset(brokerID, 0, sizeof(brokerID));
         memset(userID, 0, sizeof(userID));
         memset(password, 0, sizeof(password));
@@ -277,6 +333,8 @@ public:
         DeleteCriticalSection(&listViewLock);
     }
     
+    // 统一状态上报（UTF-8 透传到 UI）
+    // 状态回调输出到 UI
     void UpdateStatus(const char* msg) {
         if (statusCallback) {
             // 直接传递 UTF-8 编码的消息，由 main.c 的 UpdateStatus 统一处理
@@ -318,6 +376,10 @@ public:
         marketQueryIndex = 0;
         marketBatchActive = false;
         marketBatchStartRequestID = 0;
+        lastMarketQueryTick = 0;
+        marketBatchCleared = false;
+        marketReqMap.clear();
+        marketRowIndex = 0;
     }
 
     bool HasPendingMarketQuery() const {
@@ -330,6 +392,13 @@ public:
         size_t total = marketQueryQueue.size();
         size_t currentIndex = marketQueryIndex;
         const std::string& inst = marketQueryQueue[marketQueryIndex++];
+
+        const int kMinIntervalMs = 200;
+        ULONGLONG now = GetTickCount64();
+        if (lastMarketQueryTick != 0 && now - lastMarketQueryTick < (ULONGLONG)kMinIntervalMs) {
+            Sleep((DWORD)(kMinIntervalMs - (now - lastMarketQueryTick)));
+        }
+        lastMarketQueryTick = GetTickCount64();
         CThostFtdcQryDepthMarketDataField req = {0};
         if (!inst.empty()) {
             strncpy(req.InstrumentID, inst.c_str(), sizeof(req.InstrumentID) - 1);
@@ -340,20 +409,32 @@ public:
         {
             char msg[256];
             size_t sent = currentIndex + 1;
-            size_t remaining = total - sent;
-            sprintf(msg, "行情查询请求发送失败，跳过合约=%s", inst.c_str());
+            size_t totalCount = total;
+            if (inst.empty()) {
+                sprintf(msg, "正在发送行情查询(全部)");
+            } else {
+                sprintf(msg, "正在发送行情查询(%Iu/%Iu): %s", (size_t)sent, (size_t)totalCount, inst.c_str());
+            }
             UpdateStatus(msg);
         }
-        int ret = pUserApi->ReqQryDepthMarketData(&req, ++requestID);
+        int reqId = ++requestID;
+        marketReqMap[reqId] = inst;
+        int ret = pUserApi->ReqQryDepthMarketData(&req, reqId);
         if (ret != 0) {
             for (int i = 0; i < 3 && ret != 0; i++) {
                 Sleep(200);
-                ret = pUserApi->ReqQryDepthMarketData(&req, ++requestID);
+                int retryReqId = ++requestID;
+                marketReqMap[retryReqId] = inst;
+                ret = pUserApi->ReqQryDepthMarketData(&req, retryReqId);
             }
         }
         if (ret != 0) {
             char msg[256];
-            sprintf(msg, "???????????????=%s", inst.c_str());
+            if (inst.empty()) {
+                sprintf(msg, "行情查询请求发送失败，合约=全部，错误码=%d", ret);
+            } else {
+                sprintf(msg, "行情查询请求发送失败，合约=%s，错误码=%d", inst.c_str(), ret);
+            }
             UpdateStatus(msg);
             if (HasPendingMarketQuery()) {
                 return SendNextMarketQuery();
@@ -368,13 +449,18 @@ public:
     int StartMarketQueryBatch(const std::vector<std::string>& instruments) {
         if (instruments.empty()) return -1;
         if (!BeginQuery(3)) {
-            UpdateStatus("琛屾儏鏌ヨ杩涜涓紝璇风◢鍚庨噸璇?");
+            UpdateStatus("行情查询进行中，请稍后重试");
             return -3;
         }
         marketQueryQueue = instruments;
         marketQueryIndex = 0;
         marketBatchActive = true;
         marketBatchStartRequestID = 0;
+        // 点击查询时先清空列表
+        ClearListView();
+        marketBatchCleared = true;
+        marketRowIndex = 0;
+        lastMarketQueryTick = 0;
         int ret = SendNextMarketQuery();
         if (ret != 0) {
             ClearMarketQueryQueue();
@@ -406,6 +492,7 @@ public:
         instrumentRows.clear();
     }
     
+    // 若有委托数据则导出 CSV
     void ExportOrdersIfReady() {
         if (orderHeaders.empty()) return;
         char datetimeStr[15];
@@ -428,6 +515,7 @@ public:
         ExportCsv(userID, "行情", datetimeStr, marketHeaders, marketRows);
     }
     
+    // 若有合约/期权数据则导出 CSV
     void ExportInstrumentIfReady(bool isOption) {
         if (instrumentHeaders.empty()) return;
         char datetimeStr[15];
@@ -436,6 +524,7 @@ public:
         ExportCsv(userID, contentName, datetimeStr, instrumentHeaders, instrumentRows);
     }
     
+    // 清空 ListView 内容与列头
     void ClearListView() {
         EnterCriticalSection(&listViewLock);
         HWND target = hListView;
@@ -447,6 +536,7 @@ public:
     }
 
     // 统一的列头添加函数，直接使用宽字符串和 SendMessage
+    // 清空 ListView 内容与列头
     void AddColumn(int col, const WCHAR* text, int width) {
         EnterCriticalSection(&listViewLock);
         HWND target = hListView;
@@ -465,6 +555,7 @@ public:
     
     // 统一添加列表项的函数
     // 输入的文本应该是 UTF-8 编码（源文件和 CTP 消息都已转为 UTF-8）
+    // 添加/更新 ListView 单元格（UTF-8->宽字符）
     void AddItem(int row, int col, const char* text) {
         EnterCriticalSection(&listViewLock);
         HWND target = hListView;
@@ -482,6 +573,7 @@ public:
         }
         if (wlen < 0) wlen = 0;
         wtext[wlen] = L'\0';
+        // 第 0 列需要插入新行
         if (col == 0) {
             LVITEMW lvi = {0};
             lvi.mask = LVIF_TEXT;
@@ -581,6 +673,7 @@ public:
     virtual void OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast);
     virtual void OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInvestorPosition, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast);
     virtual void OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMarketData, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast);
+    // 合约/期权查询响应：填充列表与导出缓存
     virtual void OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThostFtdcRspInfoField *pRspInfo, int nRequestID, bool bIsLast);
     
     // 交易相关回调
@@ -602,7 +695,8 @@ void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoFie
         EndQuery(1);
         return;
     }
-    static int row = 0;
+    int& row = marketRowIndex;
+    int maxRecords = GetQueryMaxRecords();
     static int lastRequestID = 0;
     if (lastRequestID != nRequestID) {
         ClearListView();
@@ -632,7 +726,7 @@ void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoFie
         ResetOrderExport(headers);
         lastRequestID = nRequestID;
     }
-    if (pOrder) {
+    if (pOrder && row < maxRecords) {
         char buf[256];
         int col = 0;
         std::vector<std::string> rowData;
@@ -683,6 +777,7 @@ void TraderSpi::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInves
         return;
     }
     static int row = 0;
+    int maxRecords = GetQueryMaxRecords();
     static int lastRequestID = 0;
     if (lastRequestID != nRequestID) {
         ClearListView();
@@ -710,7 +805,7 @@ void TraderSpi::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInves
         ResetPositionExport(headers);
         lastRequestID = nRequestID;
     }
-    if (pInvestorPosition) {
+    if (pInvestorPosition && row < maxRecords) {
         char buf[256];
         int col = 0;
         std::vector<std::string> rowData;
@@ -769,11 +864,13 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
         return;
     }
     static int row = 0;
+    int maxRecords = GetQueryMaxRecords();
     static int lastRequestID = 0;
     if (lastRequestID != nRequestID) {
         bool isBatchStart = (!marketBatchActive) || (nRequestID == marketBatchStartRequestID);
-        if (isBatchStart) {
+        if (isBatchStart && !marketBatchCleared) {
             ClearListView();
+            marketBatchCleared = true;
             row = 0;
             int col = 0;
             AddColumn(col++, L"交易日", 80);
@@ -874,7 +971,24 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
         }
         lastRequestID = nRequestID;
     }
+    bool acceptMarketRow = true;
     if (pDepthMarketData) {
+        std::map<int, std::string>::const_iterator it = marketReqMap.find(nRequestID);
+        if (it == marketReqMap.end()) {
+            acceptMarketRow = false;
+        } else {
+            const std::string& expect = it->second;
+            if (!expect.empty()) {
+                char got[64];
+                CopyFixedField(got, sizeof(got), pDepthMarketData->InstrumentID, sizeof(pDepthMarketData->InstrumentID));
+                if (_stricmp(got, expect.c_str()) != 0) {
+                    acceptMarketRow = false;
+                }
+            }
+        }
+    }
+
+    if (pDepthMarketData && acceptMarketRow && row < maxRecords) {
         char buf[256];
         int col = 0;
         std::vector<std::string> rowData;
@@ -1150,8 +1264,8 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
     static int instrumentCount = 0;
     static int totalCount = 0;
     static int lastRequestID = 0;
-    const int MAX_INSTRUMENTS = 5000; // 支持更多期权
-    const int MAX_DISPLAY = 5000;
+    const int MAX_INSTRUMENTS = 10000; // 支持更多期权
+    int maxRecords = GetQueryMaxRecords();
     
     if (lastRequestID != nRequestID) {
         // 新的查询请求，清空之前的数据
@@ -1317,7 +1431,8 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
         }
         
         // 显示前MAX_DISPLAY条
-        int displayCount = instrumentCount < MAX_DISPLAY ? instrumentCount : MAX_DISPLAY;
+        int maxDisplay = maxRecords < MAX_INSTRUMENTS ? maxRecords : MAX_INSTRUMENTS;
+        int displayCount = instrumentCount < maxDisplay ? instrumentCount : maxDisplay;
         for (int i = 0; i < displayCount; i++) {
             char buf[256];
             int col = 0;
@@ -1522,6 +1637,7 @@ void TraderSpi::OnErrRtnOrderAction(CThostFtdcOrderActionField *pOrderAction, CT
 
 class MdSpi : public CThostFtdcMdSpi {
 public:
+    // 行情 API 句柄与状态
     CThostFtdcMdApi* pMdApi;
     StatusCallback statusCallback;
     HWND hMainWnd;
@@ -1531,7 +1647,10 @@ public:
     char brokerID[11];
     char userID[16];
     char password[41];
+    std::vector<std::string> pendingSubs;
+    int mdUpdateCount;
 
+    // 初始化行情 SPI 状态
     MdSpi() {
         pMdApi = NULL;
         statusCallback = NULL;
@@ -1542,14 +1661,33 @@ public:
         memset(brokerID, 0, sizeof(brokerID));
         memset(userID, 0, sizeof(userID));
         memset(password, 0, sizeof(password));
+        pendingSubs.clear();
+        mdUpdateCount = 0;
     }
 
     void UpdateStatus(const char* msg) {
         if (statusCallback) statusCallback(msg);
     }
 
+    int SubscribeList(const std::vector<std::string>& insts) {
+        if (!pMdApi) return -1;
+        if (insts.empty()) return -1;
+        std::vector<char*> ptrs;
+        ptrs.reserve(insts.size());
+        for (size_t i = 0; i < insts.size(); ++i) {
+            ptrs.push_back(const_cast<char*>(insts[i].c_str()));
+        }
+        int ret = pMdApi->SubscribeMarketData(ptrs.data(), (int)ptrs.size());
+        char msg[256];
+        sprintf(msg, "订阅请求发送%s，数量=%d，ret=%d", ret == 0 ? "成功" : "失败", (int)insts.size(), ret);
+        UpdateStatus(msg);
+        LogMessage(msg);
+        return ret;
+    }
+
     virtual void OnFrontConnected() {
         isConnected = true;
+        LogMessage("行情前置连接成功，开始登录...");
         UpdateStatus("行情连接成功，正在登录...");
         if (!pMdApi) return;
         CThostFtdcReqUserLoginField req = {0};
@@ -1577,13 +1715,86 @@ public:
             char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
             sprintf(msg, "行情登录失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
             UpdateStatus(msg);
+            LogMessage(msg);
             if (gbkErrorMsg) delete[] gbkErrorMsg;
             return;
         }
         isLoggedIn = true;
         UpdateStatus("行情登录成功");
+        LogMessage("行情登录成功");
+        if (!pendingSubs.empty()) {
+            SubscribeList(pendingSubs);
+            pendingSubs.clear();
+        }
     }
 
+    virtual void OnRspSubMarketData(CThostFtdcSpecificInstrumentField* pSpecificInstrument,
+                                    CThostFtdcRspInfoField* pRspInfo,
+                                    int nRequestID, bool bIsLast) {
+        (void)nRequestID;
+        if (pRspInfo && pRspInfo->ErrorID != 0) {
+            char msg[256];
+            char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+            sprintf(msg, "订阅回报失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+            UpdateStatus(msg);
+            LogMessage(msg);
+            if (gbkErrorMsg) delete[] gbkErrorMsg;
+            return;
+        }
+        if (pSpecificInstrument) {
+            char msg[256];
+            sprintf(msg, "订阅回报成功: %s%s", pSpecificInstrument->InstrumentID, bIsLast ? " (last)" : "");
+            UpdateStatus(msg);
+            LogMessage(msg);
+        } else {
+            char msg[128];
+            sprintf(msg, "订阅回报成功: (null)%s", bIsLast ? " (last)" : "");
+            UpdateStatus(msg);
+            LogMessage(msg);
+        }
+    }
+
+    virtual void OnRspUnSubMarketData(CThostFtdcSpecificInstrumentField* pSpecificInstrument,
+                                      CThostFtdcRspInfoField* pRspInfo,
+                                      int nRequestID, bool bIsLast) {
+        (void)nRequestID;
+        if (pRspInfo && pRspInfo->ErrorID != 0) {
+            char msg[256];
+            char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+            sprintf(msg, "退订回报失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+            UpdateStatus(msg);
+            LogMessage(msg);
+            if (gbkErrorMsg) delete[] gbkErrorMsg;
+            return;
+        }
+        if (pSpecificInstrument) {
+            char msg[256];
+            sprintf(msg, "退订回报成功: %s%s", pSpecificInstrument->InstrumentID, bIsLast ? " (last)" : "");
+            UpdateStatus(msg);
+            LogMessage(msg);
+        } else {
+            char msg[128];
+            sprintf(msg, "退订回报成功: (null)%s", bIsLast ? " (last)" : "");
+            UpdateStatus(msg);
+            LogMessage(msg);
+        }
+    }
+
+    virtual void OnRspError(CThostFtdcRspInfoField* pRspInfo,
+                            int nRequestID, bool bIsLast) {
+        (void)nRequestID;
+        if (!bIsLast) return;
+        if (pRspInfo && pRspInfo->ErrorID != 0) {
+            char msg[256];
+            char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
+            sprintf(msg, "行情错误回报: %s", gbkErrorMsg ? gbkErrorMsg : "");
+            UpdateStatus(msg);
+            LogMessage(msg);
+            if (gbkErrorMsg) delete[] gbkErrorMsg;
+        }
+    }
+
+    // 行情推送：通过消息投递到 UI 线程
     virtual void OnRtnDepthMarketData(CThostFtdcDepthMarketDataField* pDepthMarketData) {
         if (!pDepthMarketData || !hMainWnd) return;
         MdUpdate* u = (MdUpdate*)malloc(sizeof(MdUpdate));
@@ -1602,10 +1813,20 @@ public:
         u->askVolume1 = pDepthMarketData->AskVolume1;
         u->updateMillisec = (int)pDepthMarketData->UpdateMillisec;
 
+        if (mdUpdateCount < 5) {
+            char msg[256];
+            char inst[64];
+            CopyFixedField(inst, sizeof(inst), pDepthMarketData->InstrumentID, sizeof(pDepthMarketData->InstrumentID));
+            sprintf(msg, "收到行情推送: %s", inst);
+            LogMessage(msg);
+            mdUpdateCount++;
+        }
+
         PostMessage(hMainWnd, WM_APP_MD_UPDATE, 0, (LPARAM)u);
     }
 };
 
+// 解析合约列表（支持逗号/空格/换行/分号）
 static void SplitInstrumentsCsv(const char* csv, std::vector<std::string>& out) {
     out.clear();
     if (!csv) return;
@@ -1620,6 +1841,7 @@ static void SplitInstrumentsCsv(const char* csv, std::vector<std::string>& out) 
     }
 }
 
+// 对外句柄：组合交易/行情 SPI 与 UI 句柄
 struct CTPTrader {
     TraderSpi* pSpi;
     MdSpi* pMdSpi;
@@ -1627,6 +1849,7 @@ struct CTPTrader {
     HWND hMainWnd;
 };
 
+// 创建交易对象并初始化 SPI
 extern "C" CTPTrader* CreateCTPTrader() {
     LogMessage("CreateCTPTrader called");
     CTPTrader* trader = NULL;
@@ -1657,6 +1880,7 @@ extern "C" CTPTrader* CreateCTPTrader() {
 extern "C" void DestroyCTPTrader(CTPTrader* trader) {
     if (trader) {
         if (trader->pMdApi) {
+            // 解除 SPI 绑定
             trader->pMdApi->RegisterSpi(NULL);
             trader->pMdApi->Release();
             trader->pMdApi = NULL;
@@ -1666,6 +1890,7 @@ extern "C" void DestroyCTPTrader(CTPTrader* trader) {
             trader->pMdSpi = NULL;
         }
         if (trader->pSpi && trader->pSpi->pUserApi) {
+            // 解除 SPI 绑定
             trader->pSpi->pUserApi->RegisterSpi(NULL);
             trader->pSpi->pUserApi->Release();
             trader->pSpi->pUserApi = NULL;
@@ -1675,6 +1900,7 @@ extern "C" void DestroyCTPTrader(CTPTrader* trader) {
     }
 }
 
+// 断开连接：释放 API 并重置状态
 extern "C" void Disconnect(CTPTrader* trader) {
     if (!trader) return;
     if (trader->pMdApi) {
@@ -1696,7 +1922,12 @@ extern "C" void Disconnect(CTPTrader* trader) {
         trader->pSpi->isConnected = false;
         trader->pSpi->isAuthenticated = false;
         trader->pSpi->isLoggedIn = false;
-        trader->pSpi->UpdateStatus("?????");
+        trader->pSpi->ClearMarketQueryQueue();
+        trader->pSpi->EndQuery(1);
+        trader->pSpi->EndQuery(2);
+        trader->pSpi->EndQuery(3);
+        trader->pSpi->EndQuery(4);
+        trader->pSpi->UpdateStatus("已断开连接");
     }
 }
 
@@ -1713,6 +1944,15 @@ extern "C" void SetListView(CTPTrader* trader, HWND hListView) {
         trader->pSpi->hListView = hListView;
         LeaveCriticalSection(&trader->pSpi->listViewLock);
     }
+}
+
+// 设置状态回调（交易/行情共用）
+
+extern "C" void CancelMarketQuery(CTPTrader* trader) {
+    if (!trader || !trader->pSpi) return;
+    trader->pSpi->ClearMarketQueryQueue();
+    trader->pSpi->EndQuery(3);
+    trader->pSpi->UpdateStatus("行情查询已取消，可重新查询");
 }
 
 extern "C" void SetStatusCallback(CTPTrader* trader, StatusCallback callback) {
@@ -1739,6 +1979,7 @@ extern "C" int ConnectAndLogin(CTPTrader* trader, const char* brokerID, const ch
     CreateDirectoryA("flow", NULL);
     LogMessage("flow directory created");
     
+    // 保存登录参数到 SPI
     strncpy(pSpi->brokerID, brokerID, sizeof(pSpi->brokerID) - 1);
     strncpy(pSpi->userID, userID, sizeof(pSpi->userID) - 1);
     strncpy(pSpi->password, password, sizeof(pSpi->password) - 1);
@@ -1751,6 +1992,7 @@ extern "C" int ConnectAndLogin(CTPTrader* trader, const char* brokerID, const ch
     
     try {
         LogMessage("Creating API instance...");
+        // 创建交易 API 实例
         pSpi->pUserApi = CThostFtdcTraderApi::CreateFtdcTraderApi("./flow/");
         if (!pSpi->pUserApi) {
             pSpi->UpdateStatus("创建API实例失败");
@@ -1791,6 +2033,7 @@ extern "C" int ConnectAndLogin(CTPTrader* trader, const char* brokerID, const ch
         LogMessage("Front registered");
         
         try {
+            // 启动 API，进入连接流程
             pSpi->pUserApi->Init();
             LogMessage("Init called");
         } catch (...) {
@@ -1849,11 +2092,12 @@ extern "C" int QueryPositions(CTPTrader* trader) {
 extern "C" int QueryMarketData(CTPTrader* trader, const char* instrumentID) {
     if (!trader || !trader->pSpi || !trader->pSpi->pUserApi) return -1;
     std::vector<std::string> insts;
-    if (instrumentID && instrumentID[0]) insts.push_back(instrumentID);
-    if (insts.empty()) {
-        trader->pSpi->UpdateStatus("请输入合约代码");
-        return -1;
+    if (instrumentID && instrumentID[0]) {
+        insts.push_back(instrumentID);
+        return trader->pSpi->StartMarketQueryBatch(insts);
     }
+    insts.push_back(std::string());
+    trader->pSpi->UpdateStatus("正在查询全部行情...");
     return trader->pSpi->StartMarketQueryBatch(insts);
 }
 
@@ -1861,10 +2105,11 @@ extern "C" int QueryMarketDataBatch(CTPTrader* trader, const char* instrumentsCs
     if (!trader || !trader->pSpi || !trader->pSpi->pUserApi) return -1;
     std::vector<std::string> insts;
     SplitInstrumentsCsv(instrumentsCsv, insts);
-    if (insts.empty()) {
-        trader->pSpi->UpdateStatus("请输入合约代码(支持逗号/空格/换行)");
-        return -1;
+    if (!insts.empty()) {
+        return trader->pSpi->StartMarketQueryBatch(insts);
     }
+    insts.push_back(std::string());
+    trader->pSpi->UpdateStatus("正在查询全部行情...");
     return trader->pSpi->StartMarketQueryBatch(insts);
 }
 
@@ -1904,7 +2149,7 @@ extern "C" int ConnectMarket(CTPTrader* trader, const char* mdFrontAddr) {
     if (!trader || !trader->pMdSpi) return -1;
     if (trader->pMdApi != NULL) {
         trader->pMdSpi->UpdateStatus("行情已连接或正在连接中...");
-        return -1;
+        return 1;
     }
     if (!mdFrontAddr || !mdFrontAddr[0]) {
         trader->pMdSpi->UpdateStatus("错误: 行情前置地址为空");
@@ -1923,6 +2168,11 @@ extern "C" int ConnectMarket(CTPTrader* trader, const char* mdFrontAddr) {
     strncpy(trader->pMdSpi->brokerID, trader->pSpi->brokerID, sizeof(trader->pMdSpi->brokerID) - 1);
     strncpy(trader->pMdSpi->userID, trader->pSpi->userID, sizeof(trader->pMdSpi->userID) - 1);
     strncpy(trader->pMdSpi->password, trader->pSpi->password, sizeof(trader->pMdSpi->password) - 1);
+    {
+        char msg[256];
+        sprintf(msg, "行情连接参数: front=%s, broker=%s, user=%s", mdFrontAddr, trader->pMdSpi->brokerID, trader->pMdSpi->userID);
+        LogMessage(msg);
+    }
 
     CreateDirectoryA("mdflow", NULL);
     trader->pMdApi = CThostFtdcMdApi::CreateFtdcMdApi("./mdflow/");
@@ -1943,25 +2193,30 @@ extern "C" int ConnectMarket(CTPTrader* trader, const char* mdFrontAddr) {
 
 extern "C" int SubscribeMarketData(CTPTrader* trader, const char* instrumentsCsv) {
     if (!trader || !trader->pMdSpi || !trader->pMdApi) return -1;
-    if (!trader->pMdSpi->isLoggedIn) {
-        trader->pMdSpi->UpdateStatus("行情未登录，无法订阅");
-        return -1;
-    }
     std::vector<std::string> insts;
     SplitInstrumentsCsv(instrumentsCsv, insts);
     if (insts.empty()) {
         trader->pMdSpi->UpdateStatus("请输入要订阅的合约代码(支持逗号/空格分隔)");
         return -1;
     }
-    std::vector<char*> ptrs;
-    ptrs.reserve(insts.size());
     for (size_t i = 0; i < insts.size(); ++i) {
-        ptrs.push_back(const_cast<char*>(insts[i].c_str()));
+        NormalizeInstrumentId(insts[i]);
     }
-    int ret = trader->pMdApi->SubscribeMarketData(ptrs.data(), (int)ptrs.size());
-    if (ret == 0) trader->pMdSpi->UpdateStatus("订阅请求已发送");
-    else trader->pMdSpi->UpdateStatus("订阅请求发送失败");
-    return ret;
+    {
+        char msg[256];
+        if (insts.size() == 1) {
+            sprintf(msg, "订阅合约列表: %s", insts[0].c_str());
+        } else {
+            sprintf(msg, "订阅合约列表: %s, %s%s", insts[0].c_str(), insts[1].c_str(), insts.size() > 2 ? " ..." : "");
+        }
+        LogMessage(msg);
+    }
+    if (!trader->pMdSpi->isLoggedIn) {
+        trader->pMdSpi->pendingSubs = insts;
+        trader->pMdSpi->UpdateStatus("行情未登录，已缓存订阅，登录后自动发送");
+        return -2;
+    }
+    return trader->pMdSpi->SubscribeList(insts);
 }
 
 extern "C" int UnsubscribeMarketData(CTPTrader* trader, const char* instrumentsCsv) {
@@ -1975,6 +2230,9 @@ extern "C" int UnsubscribeMarketData(CTPTrader* trader, const char* instrumentsC
     if (insts.empty()) {
         trader->pMdSpi->UpdateStatus("请输入要退订的合约代码(支持逗号/空格分隔)");
         return -1;
+    }
+    for (size_t i = 0; i < insts.size(); ++i) {
+        NormalizeInstrumentId(insts[i]);
     }
     std::vector<char*> ptrs;
     ptrs.reserve(insts.size());
@@ -2063,7 +2321,3 @@ extern "C" int CancelOrder(CTPTrader* trader, const char* orderRef, const char* 
     
     return ret;
 }
-
-
-
-

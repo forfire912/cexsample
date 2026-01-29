@@ -1,4 +1,4 @@
-// CTP Trading API Wrapper Header
+﻿// CTP Trading API Wrapper Header
 
 #ifndef CTP_TRADER_H
 #define CTP_TRADER_H
@@ -44,6 +44,12 @@ void SetListView(CTPTrader* trader, HWND hListView);
 
 // 设置状态回调
 void SetStatusCallback(CTPTrader* trader, StatusCallback callback);
+
+// 设置每个查询最多输出的记录数（默认100，最大10000）
+void SetQueryMaxRecords(int maxRecords);
+
+// ????????????????? 
+void CancelMarketQuery(CTPTrader* trader);
 
 // 连接和登录
 int ConnectAndLogin(CTPTrader* trader, const char* brokerID, const char* userID, 
