@@ -87,6 +87,12 @@ static int IsDelimW(WCHAR c) {
 #define IDC_BTN_IMPORT_CODES 1110
 #define IDC_BTN_EXPORT_LATEST 1111
 
+// TAB 2: 订阅功能
+#define IDC_SUBSCRIBE_PANEL 1200
+#define IDC_EDIT_SUB_INSTRUMENT 1201
+#define IDC_RADIO_ENV_TEST_SUB 1202
+#define IDC_RADIO_ENV_PROD_SUB 1203
+
 // TAB 4: 系统设置
 
 #define IDC_SETTINGS_PANEL  1400
@@ -94,6 +100,7 @@ static int IsDelimW(WCHAR c) {
 
 #define IDT_LOGIN_POLL_TEST 2001
 #define IDT_LOGIN_POLL_PROD 2002
+#define IDT_QUERY_TIMEOUT 2003
 #define CONNECT_RETRY_DELAY_MS 10000
 #define LOGIN_POLL_INTERVAL_MS 500
 #define LOGIN_POLL_TIMEOUT_MS 20000
@@ -124,11 +131,16 @@ HWND g_hBtnConnectProd;
 
 // TAB面板
 HWND g_hQueryPanel;
+HWND g_hSubscribePanel;
 
 HWND g_hSettingsPanel;
 
 HWND g_hEditQueryMax;
 BOOL g_marketSubscribeMode = FALSE;
+BOOL g_useProdEnv = FALSE;
+BOOL g_syncingInstrumentText = FALSE;
+BOOL g_queryInFlight = FALSE;
+int g_queryInFlightType = 0;
 
 
 // 查询面板控件
@@ -136,10 +148,15 @@ HWND g_hListViewQuery;
 HWND g_hEditQueryInstrument;
 HWND g_hRadioEnvTest;
 HWND g_hRadioEnvProd;
+HWND g_hEditSubscribeInstrument;
+HWND g_hRadioEnvTestSub;
+HWND g_hRadioEnvProdSub;
 HWND g_hBtnImportCodes;
 HWND g_hBtnExportLatest;
 HWND g_hQueryControls[30];  // 查询面板所有控件数组
 int g_nQueryControlCount = 0;
+HWND g_hSubscribeControls[20];  // 订阅面板所有控件数组
+int g_nSubscribeControlCount = 0;
 
 // Excel 导入项：合约代码 + 行号（用于回写）
 typedef struct ImportItem {
@@ -172,6 +189,7 @@ const char* APP_ID = "client_long_1.0.0";
 
 void CreateMainWindow(HWND hWnd, HINSTANCE hInstance);
 void CreateQueryPanel(HWND hParent, HINSTANCE hInstance);
+void CreateSubscribePanel(HWND hParent, HINSTANCE hInstance);
 void CreateSettingsPanel(HWND hParent, HINSTANCE hInstance);
 void SwitchTab(int tabIndex);
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -179,6 +197,10 @@ void UpdateStatus(const char* msg);
 CTPTrader* GetActiveQueryTrader();
 const char* GetActiveQueryEnvName();
 static void GetActiveQueryMdFrontAddr(char* out, int outSize);
+static void SyncEnvRadios(BOOL useProd);
+static void SyncInstrumentTextFrom(HWND srcEdit);
+static void SetInstrumentTextBoth(const WCHAR* text);
+static BOOL BlockIfQueryInFlight(void);
 
 static BOOL ImportInstrumentsFromExcel(HWND owner);
 static BOOL ExportLatestToExcel(HWND owner);
@@ -488,9 +510,7 @@ static BOOL ImportInstrumentsFromExcel(HWND owner) {
     }
     buf[offset] = 0;
 
-    if (g_hEditQueryInstrument) {
-        SetWindowTextW(g_hEditQueryInstrument, buf);
-    }
+    SetInstrumentTextBoth(buf);
     free(buf);
 
     MessageBox(owner, TEXT("已导入合约代码"), TEXT("导入成功"), MB_ICONINFORMATION | MB_OK);
@@ -773,11 +793,15 @@ void CreateMainWindow(HWND hWnd, HINSTANCE hInstance) {
     tie.pszText = TEXT("查 询");
     TabCtrl_InsertItem(g_hTabControl, 0, &tie);
 
-    tie.pszText = TEXT("系统设置");
+    tie.pszText = TEXT("行情订阅");
     TabCtrl_InsertItem(g_hTabControl, 1, &tie);
+
+    tie.pszText = TEXT("系统设置");
+    TabCtrl_InsertItem(g_hTabControl, 2, &tie);
 
     // 创建各 TAB 对应的面板内容
     CreateQueryPanel(hWnd, hInstance);
+    CreateSubscribePanel(hWnd, hInstance);
     CreateSettingsPanel(hWnd, hInstance);
 
     SwitchTab(0);
@@ -836,7 +860,7 @@ void CreateQueryPanel(HWND hParent, HINSTANCE hInstance) {
     g_hRadioEnvProd = CreateWindow(TEXT("BUTTON"), TEXT("正式"), WS_CHILD | BS_AUTORADIOBUTTON,
                  x+700, y-2, 60, 24, g_hQueryPanel, (HMENU)IDC_RADIO_ENV_PROD, hInstance, NULL);
     g_hQueryControls[g_nQueryControlCount++] = g_hRadioEnvProd;
-    SendMessage(g_hRadioEnvTest, BM_SETCHECK, BST_CHECKED, 0);
+    SyncEnvRadios(FALSE);
     y += 35;
     
     // 合约输入区：支持多行、逗号分隔
@@ -874,8 +898,11 @@ void CreateQueryPanel(HWND hParent, HINSTANCE hInstance) {
     
     int listViewX = pt.x + x;
     int listViewY = pt.y + y + 10;
-    int listViewWidth = 1120;
-    int listViewHeight = 390;
+    int listViewWidth = (rcTab.right - rcTab.left) - 20;
+    int listViewHeight = (rcTab.bottom - rcTab.top) - (y + 10) - 10;
+    if (listViewHeight < 120) {
+        listViewHeight = 120;
+    }
     
     // 创建结果列表（报表模式，支持整行选中）
     g_hListViewQuery = CreateWindowEx(0, WC_LISTVIEW, TEXT(""),
@@ -885,6 +912,63 @@ void CreateQueryPanel(HWND hParent, HINSTANCE hInstance) {
     g_hQueryControls[g_nQueryControlCount++] = g_hListViewQuery;
     // 设置列表样式：整行选中+网格线
     ListView_SetExtendedListViewStyle(g_hListViewQuery, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+}
+
+// 创建订阅面板 UI（订阅按钮、输入框）
+void CreateSubscribePanel(HWND hParent, HINSTANCE hInstance) {
+    RECT rcTab;
+    GetClientRect(g_hTabControl, &rcTab);
+    TabCtrl_AdjustRect(g_hTabControl, FALSE, &rcTab);
+
+    g_hSubscribePanel = CreateWindow(TEXT("STATIC"), TEXT(""),
+                 WS_CHILD,
+                 rcTab.left + 10, rcTab.top + 10,
+                 rcTab.right - rcTab.left - 20, rcTab.bottom - rcTab.top - 20,
+                 g_hTabControl, (HMENU)IDC_SUBSCRIBE_PANEL, hInstance, NULL);
+    g_hSubscribeControls[g_nSubscribeControlCount++] = g_hSubscribePanel;
+
+    if (g_oldPanelProc == NULL) {
+        g_oldPanelProc = (WNDPROC)GetWindowLongPtr(g_hSubscribePanel, GWLP_WNDPROC);
+    }
+    SetWindowLongPtr(g_hSubscribePanel, GWLP_WNDPROC, (LONG_PTR)PanelProc);
+
+    int x = 15;
+    int y = 10;
+
+    g_hSubscribeControls[g_nSubscribeControlCount++] = CreateWindow(TEXT("STATIC"), TEXT("订阅操作:"), WS_CHILD,
+                 x, y, 80, 20, g_hSubscribePanel, NULL, hInstance, NULL);
+    g_hSubscribeControls[g_nSubscribeControlCount++] = CreateWindow(TEXT("BUTTON"), TEXT("订阅行情"), WS_CHILD | BS_PUSHBUTTON,
+                 x+85, y-2, 90, 28, g_hSubscribePanel, (HMENU)IDC_BTN_SUB_MD, hInstance, NULL);
+    g_hSubscribeControls[g_nSubscribeControlCount++] = CreateWindow(TEXT("BUTTON"), TEXT("取消订阅"), WS_CHILD | BS_PUSHBUTTON,
+                 x+185, y-2, 90, 28, g_hSubscribePanel, (HMENU)IDC_BTN_UNSUB_MD, hInstance, NULL);
+
+    // 环境选择（测试/正式）
+    g_hSubscribeControls[g_nSubscribeControlCount++] = CreateWindow(TEXT("STATIC"), TEXT("环境:"), WS_CHILD,
+                 x+590, y+3, 50, 20, g_hSubscribePanel, NULL, hInstance, NULL);
+    g_hRadioEnvTestSub = CreateWindow(TEXT("BUTTON"), TEXT("测试"), WS_CHILD | BS_AUTORADIOBUTTON | WS_GROUP,
+                 x+635, y-2, 60, 24, g_hSubscribePanel, (HMENU)IDC_RADIO_ENV_TEST_SUB, hInstance, NULL);
+    g_hSubscribeControls[g_nSubscribeControlCount++] = g_hRadioEnvTestSub;
+    g_hRadioEnvProdSub = CreateWindow(TEXT("BUTTON"), TEXT("正式"), WS_CHILD | BS_AUTORADIOBUTTON,
+                 x+700, y-2, 60, 24, g_hSubscribePanel, (HMENU)IDC_RADIO_ENV_PROD_SUB, hInstance, NULL);
+    g_hSubscribeControls[g_nSubscribeControlCount++] = g_hRadioEnvProdSub;
+    SyncEnvRadios(g_useProdEnv);
+
+    y += 35;
+
+    g_hSubscribeControls[g_nSubscribeControlCount++] = CreateWindow(TEXT("STATIC"), TEXT("合约代码:"), WS_CHILD,
+                 x, y+3, 70, 20, g_hSubscribePanel, NULL, hInstance, NULL);
+    g_hEditSubscribeInstrument = CreateWindowEx(WS_EX_CLIENTEDGE, TEXT("EDIT"), TEXT(""),
+                 WS_CHILD | WS_BORDER | ES_UPPERCASE | ES_MULTILINE | ES_AUTOVSCROLL | WS_VSCROLL,
+                 x+75, y, 340, 70, g_hSubscribePanel, (HMENU)IDC_EDIT_SUB_INSTRUMENT, hInstance, NULL);
+    SendMessage(g_hEditSubscribeInstrument, EM_LIMITTEXT, 32767, 0);
+    g_hSubscribeControls[g_nSubscribeControlCount++] = g_hEditSubscribeInstrument;
+
+    g_hSubscribeControls[g_nSubscribeControlCount++] = CreateWindow(TEXT("STATIC"), TEXT("(输入合约代码后点击订阅)"), WS_CHILD,
+                 x+75, y+50, 300, 20, g_hSubscribePanel, NULL, hInstance, NULL);
+
+    y += 80;
+    g_hSubscribeControls[g_nSubscribeControlCount++] = CreateWindow(TEXT("STATIC"), TEXT("订阅结果:"), WS_CHILD,
+                 x, y, 80, 20, g_hSubscribePanel, NULL, hInstance, NULL);
 }
 
 // ========== 创建持仓管理面板 ==========
@@ -1008,17 +1092,70 @@ void SwitchTab(int tabIndex) {
         ShowWindow(g_hQueryControls[i], tabIndex == 0 ? SW_SHOW : SW_HIDE);
     }
 
-    
+    // 显示/隐藏订阅面板的所有控件
+    for (int i = 0; i < g_nSubscribeControlCount; i++) {
+        ShowWindow(g_hSubscribeControls[i], tabIndex == 1 ? SW_SHOW : SW_HIDE);
+    }
+
     // 显示/隐藏系统设置面板容器（及其子控件）
-    ShowWindow(g_hSettingsPanel, tabIndex == 1 ? SW_SHOW : SW_HIDE);
+    ShowWindow(g_hSettingsPanel, tabIndex == 2 ? SW_SHOW : SW_HIDE);
+
+    // 行情列表用于查询/订阅两页
+    if (g_hListViewQuery) {
+        ShowWindow(g_hListViewQuery, (tabIndex == 0 || tabIndex == 1) ? SW_SHOW : SW_HIDE);
+    }
     
     // 强制重绘主窗口
     InvalidateRect(g_hMainWnd, NULL, TRUE);
 }
 
+static void SyncEnvRadios(BOOL useProd) {
+    g_useProdEnv = useProd ? TRUE : FALSE;
+    if (g_hRadioEnvTest) SendMessage(g_hRadioEnvTest, BM_SETCHECK, g_useProdEnv ? BST_UNCHECKED : BST_CHECKED, 0);
+    if (g_hRadioEnvProd) SendMessage(g_hRadioEnvProd, BM_SETCHECK, g_useProdEnv ? BST_CHECKED : BST_UNCHECKED, 0);
+    if (g_hRadioEnvTestSub) SendMessage(g_hRadioEnvTestSub, BM_SETCHECK, g_useProdEnv ? BST_UNCHECKED : BST_CHECKED, 0);
+    if (g_hRadioEnvProdSub) SendMessage(g_hRadioEnvProdSub, BM_SETCHECK, g_useProdEnv ? BST_CHECKED : BST_UNCHECKED, 0);
+}
+
+static void SyncInstrumentTextFrom(HWND srcEdit) {
+    if (g_syncingInstrumentText || !srcEdit) return;
+    HWND dstEdit = (srcEdit == g_hEditQueryInstrument) ? g_hEditSubscribeInstrument : g_hEditQueryInstrument;
+    if (!dstEdit) return;
+
+    int len = GetWindowTextLengthW(srcEdit);
+    WCHAR* buf = (WCHAR*)malloc((len + 1) * sizeof(WCHAR));
+    if (!buf) return;
+    GetWindowTextW(srcEdit, buf, len + 1);
+
+    g_syncingInstrumentText = TRUE;
+    SetWindowTextW(dstEdit, buf);
+    g_syncingInstrumentText = FALSE;
+    free(buf);
+}
+
+static void SetInstrumentTextBoth(const WCHAR* text) {
+    if (!text) return;
+    g_syncingInstrumentText = TRUE;
+    if (g_hEditQueryInstrument) {
+        SetWindowTextW(g_hEditQueryInstrument, text);
+    }
+    if (g_hEditSubscribeInstrument) {
+        SetWindowTextW(g_hEditSubscribeInstrument, text);
+    }
+    g_syncingInstrumentText = FALSE;
+}
+
+static BOOL BlockIfQueryInFlight(void) {
+    if (g_queryInFlight) {
+        UpdateStatus("上一条查询未返回，请稍后再试");
+        return TRUE;
+    }
+    return FALSE;
+}
+
 // 根据查询环境单选按钮获取当前 Trader 实例（测试/正式）
 CTPTrader* GetActiveQueryTrader() {
-    if (g_hRadioEnvProd && SendMessage(g_hRadioEnvProd, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+    if (g_useProdEnv) {
         // 正式环境被选中时使用正式 Trader
         return g_pTraderProd;
     }
@@ -1027,7 +1164,7 @@ CTPTrader* GetActiveQueryTrader() {
 
 // 获取当前查询环境的显示名称（用于状态提示）
 const char* GetActiveQueryEnvName() {
-    if (g_hRadioEnvProd && SendMessage(g_hRadioEnvProd, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+    if (g_useProdEnv) {
         return "正式";
     }
     return "测试";
@@ -1037,7 +1174,7 @@ static void GetActiveQueryMdFrontAddr(char* out, int outSize) {
     if (!out || outSize <= 0) return;
     out[0] = 0;
     WCHAR wAddr[128] = {0};
-    if (g_hRadioEnvProd && SendMessage(g_hRadioEnvProd, BM_GETCHECK, 0, 0) == BST_CHECKED) {
+    if (g_useProdEnv) {
         if (g_hEditMdFrontAddrProd) {
             GetWindowText(g_hEditMdFrontAddrProd, wAddr, _countof(wAddr));
         }
@@ -1080,7 +1217,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 SwitchTab(tabIndex);
                 
                 // 根据TAB切换ListView
-                if (tabIndex == 0) {
+                if (tabIndex == 0 || tabIndex == 1) {
                     CTPTrader* trader = GetActiveQueryTrader();
                     if (trader) {
                         // 切换 Trader 的输出列表到查询列表
@@ -1092,6 +1229,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             
             // 处理 ListView 点击：选中合约后自动填充输入框
             if (pnmhdr->idFrom == IDC_LISTVIEW_QUERY) {
+                if (pnmhdr->code == LVN_INSERTITEM) {
+                    g_queryInFlight = FALSE;
+                    g_queryInFlightType = 0;
+                    KillTimer(g_hMainWnd, IDT_QUERY_TIMEOUT);
+                    return 0;
+                }
                 if (pnmhdr->code == LVN_ITEMCHANGED) {
                     // 处理选中状态的变化
                     LPNMLISTVIEW pnmv = (LPNMLISTVIEW)lParam;
@@ -1109,7 +1252,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         if (len > 0) {
                             int curLen = GetWindowTextLength(g_hEditQueryInstrument);
                             if (curLen <= 0) {
-                                SetWindowText(g_hEditQueryInstrument, instrumentID);
+                                SetInstrumentTextBoth(instrumentID);
                             } else {
                                 WCHAR* curBuf = (WCHAR*)malloc((curLen + 1) * sizeof(WCHAR));
                                 if (curBuf) {
@@ -1142,7 +1285,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                                             }
                                             memcpy(newBuf + end + sepLen, instrumentID, (len) * sizeof(WCHAR));
                                             newBuf[newLen] = 0;
-                                            SetWindowText(g_hEditQueryInstrument, newBuf);
+                                            SetInstrumentTextBoth(newBuf);
                                             free(newBuf);
                                         }
                                     }
@@ -1169,10 +1312,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             // 按钮/菜单命令统一在此处理
             switch (LOWORD(wParam)) {
                 case IDC_RADIO_ENV_TEST:
-                case IDC_RADIO_ENV_PROD: {
+                case IDC_RADIO_ENV_PROD:
+                case IDC_RADIO_ENV_TEST_SUB:
+                case IDC_RADIO_ENV_PROD_SUB: {
                     // 切换环境时同步更新默认连接参数
                     if (HIWORD(wParam) == BN_CLICKED) {
-                        BOOL useProd = (LOWORD(wParam) == IDC_RADIO_ENV_PROD);
+                        BOOL useProd = (LOWORD(wParam) == IDC_RADIO_ENV_PROD || LOWORD(wParam) == IDC_RADIO_ENV_PROD_SUB);
+                        SyncEnvRadios(useProd);
                         if (useProd) {
                             if (g_hEditFrontAddrProd) SetWindowText(g_hEditFrontAddrProd, TEXT("tcp://58.247.171.151:31205"));
                             if (g_hEditMdFrontAddrProd) SetWindowText(g_hEditMdFrontAddrProd, TEXT("tcp://58.247.171.151:31213"));
@@ -1201,6 +1347,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 case IDC_EDIT_QUERY_MAX: {
                     if (HIWORD(wParam) == EN_KILLFOCUS) {
                         ApplyQueryMaxRecordsFromEdit(g_hEditQueryMax);
+                    }
+                    break;
+                }
+                case IDC_EDIT_QUERY_INSTRUMENT:
+                case IDC_EDIT_SUB_INSTRUMENT: {
+                    if (HIWORD(wParam) == EN_CHANGE) {
+                        HWND srcEdit = (HWND)lParam;
+                        SyncInstrumentTextFrom(srcEdit);
                     }
                     break;
                 }
@@ -1301,10 +1455,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
                 case IDC_BTN_QUERY_ORDER: {
                     // 查询委托：要求已登录
+                    if (BlockIfQueryInFlight()) break;
                     CTPTrader* trader = GetActiveQueryTrader();
                     if (trader && IsLoggedIn(trader)) {
                         SetListView(trader, g_hListViewQuery);
                         UpdateStatus("正在查询委托...");
+                        g_queryInFlight = TRUE;
+                        g_queryInFlightType = 1;
+                        SetTimer(g_hMainWnd, IDT_QUERY_TIMEOUT, 8000, NULL);
                         QueryOrders(trader);
                     } else {
                         char msg[128];
@@ -1315,10 +1473,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 }
                 case IDC_BTN_QUERY_POS: {
                     // 查询持仓：要求已登录
+                    if (BlockIfQueryInFlight()) break;
                     CTPTrader* trader = GetActiveQueryTrader();
                     if (trader && IsLoggedIn(trader)) {
                         SetListView(trader, g_hListViewQuery);
                         UpdateStatus("正在查询持仓...");
+                        g_queryInFlight = TRUE;
+                        g_queryInFlightType = 2;
+                        SetTimer(g_hMainWnd, IDT_QUERY_TIMEOUT, 8000, NULL);
                         QueryPositions(trader);
                     } else {
                         char msg[128];
@@ -1328,123 +1490,59 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     break;
                 }
                 case IDC_BTN_QUERY_MARKET: {
-                    // 查询行情：校验合约输入并发起批量查询
+                    // 查询行情：按合约代码查询（不走订阅）
+                    if (BlockIfQueryInFlight()) break;
                     CTPTrader* trader = GetActiveQueryTrader();
                     if (trader && IsLoggedIn(trader)) {
                         SetListView(trader, g_hListViewQuery);
+                        WCHAR* instrumentBuf = NULL;
                         int textLen = GetWindowTextLength(g_hEditQueryInstrument);
-                        if (textLen <= 0) {
-                            UpdateStatus("正在查询全部行情...");
-                            g_marketSubscribeMode = FALSE;
-                            int result = QueryMarketDataBatch(trader, "");
-                            if (result == 0) {
-                                UpdateStatus("行情查询请求已发送，请等待响应...");
-                                SetTimer(g_hMainWnd, 1001, 5000, NULL);
-                            } else {
-                                UpdateStatus("错误: 行情查询请求发送失败");
-                            }
-                        } else {
-                            WCHAR* instrumentBuf = (WCHAR*)malloc((textLen + 1) * sizeof(WCHAR));
+                        if (textLen > 0) {
+                            instrumentBuf = (WCHAR*)malloc((textLen + 1) * sizeof(WCHAR));
                             if (!instrumentBuf) {
                                 UpdateStatus("错误: 内存不足");
                                 break;
                             }
                             GetWindowText(g_hEditQueryInstrument, instrumentBuf, textLen + 1);
-                            
-                            // 去除首尾空白和分隔符（允许逗号/分号分隔）
-                            int start = 0;
-                            int end = (int)wcslen(instrumentBuf);
-                            while (start < end) {
-                                WCHAR c = instrumentBuf[start];
-                                if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n' || c == L',' || c == L';') {
-                                    start++;
-                                } else {
-                                    break;
-                                }
-                            }
-                            while (end > start) {
-                                WCHAR c = instrumentBuf[end - 1];
-                                if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n' || c == L',' || c == L';') {
-                                    end--;
-                                } else {
-                                    break;
-                                }
-                            }
-                            instrumentBuf[end] = 0;
-                            if (start > 0) {
-                                memmove(instrumentBuf, instrumentBuf + start, (end - start + 1) * sizeof(WCHAR));
-                            }
-                            
-                            if (instrumentBuf[0] == 0) {
-                                UpdateStatus("正在查询全部行情...");
-                                g_marketSubscribeMode = FALSE;
-                                int result = QueryMarketDataBatch(trader, "");
-                                if (result == 0) {
-                                    UpdateStatus("行情查询请求已发送，请等待响应...");
-                                    SetTimer(g_hMainWnd, 1001, 5000, NULL);
-                                } else {
-                                    UpdateStatus("错误: 行情查询请求发送失败");
-                                }
-                                free(instrumentBuf);
-                            } else {
-                                int ansiLen = WideCharToMultiByte(CP_ACP, 0, instrumentBuf, -1, NULL, 0, NULL, NULL);
-                                if (ansiLen <= 0) {
-                                    UpdateStatus("错误: 字符转换失败");
-                                    free(instrumentBuf);
-                                    break;
-                                }
-                                char* ansiInstruments = (char*)malloc(ansiLen);
-                                if (!ansiInstruments) {
-                                    UpdateStatus("错误: 内存不足");
-                                    free(instrumentBuf);
-                                    break;
-                                }
-                                // 转换合约列表为 ANSI 字符串
-                                WideCharToMultiByte(CP_ACP, 0, instrumentBuf, -1, ansiInstruments, ansiLen, NULL, NULL);
-                                
-                                // 优先使用行情接口订阅，避免交易接口查询不到行情
-                                char mdFrontAddr[128] = {0};
-                                GetActiveQueryMdFrontAddr(mdFrontAddr, sizeof(mdFrontAddr));
-                                if (!mdFrontAddr[0]) {
-                                    UpdateStatus("错误: 行情前置地址为空");
-                                    free(ansiInstruments);
-                                    free(instrumentBuf);
-                                    break;
-                                }
-
-                                int connectResult = ConnectMarket(trader, mdFrontAddr);
-                                if (connectResult < 0) {
-                                    free(ansiInstruments);
-                                    free(instrumentBuf);
-                                    break;
-                                }
-
-                                // 清空列表与列，确保展示为行情列
-                                if (g_hListViewQuery && IsWindow(g_hListViewQuery)) {
-                                    ListView_DeleteAllItems(g_hListViewQuery);
-                                    while (ListView_DeleteColumn(g_hListViewQuery, 0));
-                                }
-
-                                // 订阅前先取消同列表订阅，避免重复
-                                UnsubscribeMarketData(trader, ansiInstruments);
-
-                                UpdateStatus("正在订阅行情...");
-                                g_marketSubscribeMode = TRUE;
-                                int result = SubscribeMarketData(trader, ansiInstruments);
-                                free(ansiInstruments);
-                                free(instrumentBuf);
-                                
-                                // 提示用户可能的限制
-                                if (result == 0 || result == -2) {
-                                    UpdateStatus("行情订阅请求已发送，请等待响应...");
-                                    
-                                    // 设置一个定时器，5 秒后检查是否有数据
-                                    SetTimer(g_hMainWnd, 1001, 5000, NULL);
-                                } else {
-                                    UpdateStatus("错误: 行情订阅请求发送失败");
-                                }
-                            }
+                            TrimInPlaceW(instrumentBuf);
                         }
+
+                        g_marketSubscribeMode = FALSE;
+                        char* ansiInstruments = NULL;
+                        const char* queryList = "";
+                        if (instrumentBuf && instrumentBuf[0]) {
+                            int ansiLen = WideCharToMultiByte(CP_ACP, 0, instrumentBuf, -1, NULL, 0, NULL, NULL);
+                            if (ansiLen <= 0) {
+                                UpdateStatus("错误: 字符转换失败");
+                                free(instrumentBuf);
+                                break;
+                            }
+                            ansiInstruments = (char*)malloc(ansiLen);
+                            if (!ansiInstruments) {
+                                UpdateStatus("错误: 内存不足");
+                                free(instrumentBuf);
+                                break;
+                            }
+                            WideCharToMultiByte(CP_ACP, 0, instrumentBuf, -1, ansiInstruments, ansiLen, NULL, NULL);
+                            queryList = ansiInstruments;
+                        }
+
+                        if (!queryList[0]) {
+                            UpdateStatus("正在查询全部行情...");
+                        } else {
+                            UpdateStatus("正在查询行情...");
+                        }
+                        int result = QueryMarketDataBatch(trader, queryList);
+                        if (result == 0) {
+                            g_queryInFlight = TRUE;
+                            g_queryInFlightType = 3;
+                            UpdateStatus("行情查询请求已发送，请等待响应...");
+                            SetTimer(g_hMainWnd, 1001, 5000, NULL);
+                        } else {
+                            UpdateStatus("错误: 行情查询请求发送失败");
+                        }
+                        if (ansiInstruments) free(ansiInstruments);
+                        if (instrumentBuf) free(instrumentBuf);
                     } else {
                         char msg[128];
                         sprintf(msg, "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
@@ -1452,7 +1550,134 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     }
                     break;
                 }
-                                case IDC_BTN_IMPORT_CODES: {
+                case IDC_BTN_SUB_MD: {
+                    // 订阅行情：使用行情接口
+                    CTPTrader* trader = GetActiveQueryTrader();
+                    if (trader && IsLoggedIn(trader)) {
+                        SetListView(trader, g_hListViewQuery);
+                        HWND hEdit = g_hEditSubscribeInstrument ? g_hEditSubscribeInstrument : g_hEditQueryInstrument;
+                        int textLen = hEdit ? GetWindowTextLength(hEdit) : 0;
+                        if (textLen <= 0) {
+                            UpdateStatus("错误: 请输入合约代码");
+                            break;
+                        }
+                        WCHAR* instrumentBuf = (WCHAR*)malloc((textLen + 1) * sizeof(WCHAR));
+                        if (!instrumentBuf) {
+                            UpdateStatus("错误: 内存不足");
+                            break;
+                        }
+                        GetWindowText(hEdit, instrumentBuf, textLen + 1);
+                        TrimInPlaceW(instrumentBuf);
+                        if (instrumentBuf[0] == 0) {
+                            UpdateStatus("错误: 请输入合约代码");
+                            free(instrumentBuf);
+                            break;
+                        }
+
+                        int ansiLen = WideCharToMultiByte(CP_ACP, 0, instrumentBuf, -1, NULL, 0, NULL, NULL);
+                        if (ansiLen <= 0) {
+                            UpdateStatus("错误: 字符转换失败");
+                            free(instrumentBuf);
+                            break;
+                        }
+                        char* ansiInstruments = (char*)malloc(ansiLen);
+                        if (!ansiInstruments) {
+                            UpdateStatus("错误: 内存不足");
+                            free(instrumentBuf);
+                            break;
+                        }
+                        WideCharToMultiByte(CP_ACP, 0, instrumentBuf, -1, ansiInstruments, ansiLen, NULL, NULL);
+
+                        char mdFrontAddr[128] = {0};
+                        GetActiveQueryMdFrontAddr(mdFrontAddr, sizeof(mdFrontAddr));
+                        if (!mdFrontAddr[0]) {
+                            UpdateStatus("错误: 行情前置地址为空");
+                            free(ansiInstruments);
+                            free(instrumentBuf);
+                            break;
+                        }
+                        int connectResult = ConnectMarket(trader, mdFrontAddr);
+                        if (connectResult < 0) {
+                            free(ansiInstruments);
+                            free(instrumentBuf);
+                            break;
+                        }
+
+                        // 清空列表与列，确保展示为行情列
+                        if (g_hListViewQuery && IsWindow(g_hListViewQuery)) {
+                            ListView_DeleteAllItems(g_hListViewQuery);
+                            while (ListView_DeleteColumn(g_hListViewQuery, 0));
+                        }
+
+                        UnsubscribeMarketData(trader, ansiInstruments);
+
+                        UpdateStatus("正在订阅行情...");
+                        g_marketSubscribeMode = TRUE;
+                        int result = SubscribeMarketData(trader, ansiInstruments);
+                        if (result == 0 || result == -2) {
+                            UpdateStatus("行情订阅请求已发送，请等待响应...");
+                            SetTimer(g_hMainWnd, 1001, 5000, NULL);
+                        } else {
+                            UpdateStatus("错误: 行情订阅请求发送失败");
+                        }
+                        free(ansiInstruments);
+                        free(instrumentBuf);
+                    } else {
+                        char msg[128];
+                        sprintf(msg, "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
+                        UpdateStatus(msg);
+                    }
+                    break;
+                }
+                case IDC_BTN_UNSUB_MD: {
+                    // 取消订阅行情
+                    CTPTrader* trader = GetActiveQueryTrader();
+                    if (trader && IsLoggedIn(trader)) {
+                        HWND hEdit = g_hEditSubscribeInstrument ? g_hEditSubscribeInstrument : g_hEditQueryInstrument;
+                        int textLen = hEdit ? GetWindowTextLength(hEdit) : 0;
+                        if (textLen <= 0) {
+                            UpdateStatus("错误: 请输入合约代码");
+                            break;
+                        }
+                        WCHAR* instrumentBuf = (WCHAR*)malloc((textLen + 1) * sizeof(WCHAR));
+                        if (!instrumentBuf) {
+                            UpdateStatus("错误: 内存不足");
+                            break;
+                        }
+                        GetWindowText(hEdit, instrumentBuf, textLen + 1);
+                        TrimInPlaceW(instrumentBuf);
+                        if (instrumentBuf[0] == 0) {
+                            UpdateStatus("错误: 请输入合约代码");
+                            free(instrumentBuf);
+                            break;
+                        }
+
+                        int ansiLen = WideCharToMultiByte(CP_ACP, 0, instrumentBuf, -1, NULL, 0, NULL, NULL);
+                        if (ansiLen <= 0) {
+                            UpdateStatus("错误: 字符转换失败");
+                            free(instrumentBuf);
+                            break;
+                        }
+                        char* ansiInstruments = (char*)malloc(ansiLen);
+                        if (!ansiInstruments) {
+                            UpdateStatus("错误: 内存不足");
+                            free(instrumentBuf);
+                            break;
+                        }
+                        WideCharToMultiByte(CP_ACP, 0, instrumentBuf, -1, ansiInstruments, ansiLen, NULL, NULL);
+
+                        UnsubscribeMarketData(trader, ansiInstruments);
+                        UpdateStatus("已发送取消订阅请求");
+                        free(ansiInstruments);
+                        free(instrumentBuf);
+                    } else {
+                        char msg[128];
+                        sprintf(msg, "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
+                        UpdateStatus(msg);
+                    }
+                    break;
+                }
+                case IDC_BTN_IMPORT_CODES: {
                     // 从 Excel 导入合约代码
                     ImportInstrumentsFromExcel(g_hMainWnd);
                     break;
@@ -1465,10 +1690,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
                 case IDC_BTN_QUERY_OPTION: {
                     // 查询期权合约：要求已登录
+                    if (BlockIfQueryInFlight()) break;
                     CTPTrader* trader = GetActiveQueryTrader();
                     if (trader && IsLoggedIn(trader)) {
                         SetListView(trader, g_hListViewQuery);
                         UpdateStatus("正在查询期权合约...");
+                        g_queryInFlight = TRUE;
+                        g_queryInFlightType = 4;
+                        SetTimer(g_hMainWnd, IDT_QUERY_TIMEOUT, 8000, NULL);
                         QueryOptions(trader);
                     } else {
                         char msg[128];
@@ -1476,12 +1705,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         UpdateStatus(msg);
                     }
                     break;
-                }                case IDC_BTN_QUERY_INST: {
+                }
+                case IDC_BTN_QUERY_INST: {
                     // 查询合约列表：要求已登录
+                    if (BlockIfQueryInFlight()) break;
                     CTPTrader* trader = GetActiveQueryTrader();
                     if (trader && IsLoggedIn(trader)) {
                         SetListView(trader, g_hListViewQuery);
                         UpdateStatus("正在查询合约...");
+                        g_queryInFlight = TRUE;
+                        g_queryInFlightType = 4;
+                        SetTimer(g_hMainWnd, IDT_QUERY_TIMEOUT, 8000, NULL);
                         QueryInstrument(trader, "");
                     } else {
                         char msg[128];
@@ -1498,6 +1732,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             // 行情更新消息：刷新/新增 ListView 行
             MdUpdate* u = (MdUpdate*)lParam;
             if (!u) return 0;
+            g_queryInFlight = FALSE;
             // ListView 不可用则丢弃行情
             if (!g_hListViewQuery || !IsWindow(g_hListViewQuery)) {
                 free(u);
@@ -1600,6 +1835,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 }
                 return 0;
             }
+            if (wParam == IDT_QUERY_TIMEOUT) {
+                if (g_queryInFlight) {
+                    UpdateStatus("上一条查询未返回，请稍后再试");
+                    g_queryInFlight = FALSE;
+                    g_queryInFlightType = 0;
+                }
+                KillTimer(g_hMainWnd, IDT_QUERY_TIMEOUT);
+                return 0;
+            }
             
             // 行情查询后检查是否收到数据
             if (wParam == 1001) {
@@ -1632,6 +1876,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 if (trader && !g_marketSubscribeMode) {
                     CancelMarketQuery(trader);
                 }
+                g_queryInFlight = FALSE;
+                g_queryInFlightType = 0;
+                KillTimer(g_hMainWnd, IDT_QUERY_TIMEOUT);
                 KillTimer(g_hMainWnd, 1001);
             }
             return 0;
