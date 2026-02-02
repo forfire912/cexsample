@@ -87,6 +87,10 @@ int QueryMarketData(CTPTrader* trader, const char* instrumentID);
 int QueryMarketDataBatch(CTPTrader* trader, const char* instrumentsCsv);
 int QueryInstrument(CTPTrader* trader, const char* instrumentID);
 int QueryOptions(CTPTrader* trader);
+// 行情批量查询超时推进
+int MarketQueryTick(CTPTrader* trader);
+// 行情批量查询是否仍在进行中（用于 UI 定时器收尾）
+int IsMarketQueryActive(CTPTrader* trader);
 
 // Market data subscription (MD API)
 // mdFrontAddr: market front address (often different from trading front)

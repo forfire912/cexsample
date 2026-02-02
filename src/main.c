@@ -95,6 +95,7 @@ static int IsDelimW(WCHAR c) {
 
 #define IDT_LOGIN_POLL_PROD 2002
 #define IDT_QUERY_TIMEOUT 2003
+#define IDT_MD_SUB_CHECK 2004
 #define CONNECT_RETRY_DELAY_MS 10000
 #define LOGIN_POLL_INTERVAL_MS 500
 #define LOGIN_POLL_TIMEOUT_MS 20000
@@ -197,6 +198,7 @@ static BOOL ExportLatestToExcel(HWND owner);
 static void UpdateStatusOnUiThread(const char* msg);
 static int SafeStrnlenA(const char* s, int maxLen);
 static void SafeFormatA(char* buf, size_t size, const char* fmt, ...);
+static int FindListViewColumn(HWND hListView, const WCHAR* name);
 
 static int ClampQueryMaxRecords(int value) {
     if (value < 1) return 1;
@@ -513,9 +515,15 @@ static BOOL ImportInstrumentsFromExcel(HWND owner) {
 // 在行情列表中查找合约最新价（用于导出）
 static BOOL TryGetListViewPrice(const WCHAR* instrument, double* outPrice) {
     if (!g_hListViewQuery || !instrument || !outPrice) return FALSE;
-    // ListView 列索引：合约列/价格列
-    int instCol = 1;  // left 2nd column
-    int priceCol = 8; // left 9th column
+    // ListView 列索引：合约列/价格列（按列名优先匹配）
+    int instCol = FindListViewColumn(g_hListViewQuery, L"合约");
+    if (instCol < 0) instCol = FindListViewColumn(g_hListViewQuery, L"合约代码");
+    if (instCol < 0) instCol = FindListViewColumn(g_hListViewQuery, L"查询合约");
+    if (instCol < 0) instCol = 1;
+
+    int priceCol = FindListViewColumn(g_hListViewQuery, L"最新价");
+    if (priceCol < 0) priceCol = FindListViewColumn(g_hListViewQuery, L"最新");
+    if (priceCol < 0) priceCol = 8;
     WCHAR want[64] = {0};
     wcsncpy(want, instrument, _countof(want) - 1);
     want[_countof(want) - 1] = 0;
@@ -627,6 +635,23 @@ static BOOL ExportLatestToExcel(HWND owner) {
     swprintf_s(msg, _countof(msg), L"已写入 %d 条，未找到行情 %d 条", written, missing);
     MessageBox(owner, msg, TEXT("导出完成"), MB_ICONINFORMATION | MB_OK);
     return TRUE;
+}
+
+static int FindListViewColumn(HWND hListView, const WCHAR* name) {
+    if (!hListView || !name || !name[0]) return -1;
+    HWND hdr = ListView_GetHeader(hListView);
+    int colCount = hdr ? Header_GetItemCount(hdr) : 0;
+    for (int i = 0; i < colCount; i++) {
+        WCHAR text[64] = {0};
+        LVCOLUMNW c = {0};
+        c.mask = LVCF_TEXT;
+        c.pszText = text;
+        c.cchTextMax = _countof(text);
+        if (SendMessage(hListView, LVM_GETCOLUMNW, i, (LPARAM)&c)) {
+            if (wcscmp(text, name) == 0) return i;
+        }
+    }
+    return -1;
 }
 
 // 根据连接状态切换按钮文案
@@ -1355,9 +1380,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                             g_queryInFlight = TRUE;
                             g_queryInFlightType = 3;
                             UpdateStatus("行情查询请求已发送，请等待响应...");
-                            SetTimer(g_hMainWnd, 1001, 5000, NULL);
+                            // 行情查询使用批量推进机制：需要更频繁的 tick 来处理退避/超时/继续发送
+                            SetTimer(g_hMainWnd, IDT_QUERY_TIMEOUT, 500, NULL);
+                        } else if (result == -3) {
+                            UpdateStatus("行情查询进行中，请稍后再试");
                         } else {
                             UpdateStatus("错误: 行情查询请求发送失败");
+                            g_queryInFlight = FALSE;
+                            g_queryInFlightType = 0;
+                            KillTimer(g_hMainWnd, IDT_QUERY_TIMEOUT);
+                            CancelMarketQuery(trader);
                         }
                         if (ansiInstruments) free(ansiInstruments);
                         if (instrumentBuf) free(instrumentBuf);
@@ -1434,7 +1466,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         int result = SubscribeMarketData(trader, ansiInstruments);
                         if (result == 0 || result == -2) {
                             UpdateStatus("行情订阅请求已发送，请等待响应...");
-                            SetTimer(g_hMainWnd, 1001, 5000, NULL);
+                            SetTimer(g_hMainWnd, IDT_MD_SUB_CHECK, 5000, NULL);
                         } else {
                             UpdateStatus("错误: 行情订阅请求发送失败");
                         }
@@ -1732,6 +1764,21 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
             if (wParam == IDT_QUERY_TIMEOUT) {
                 if (g_queryInFlight) {
+                    if (g_queryInFlightType == 3) {
+                        CTPTrader* trader = GetActiveQueryTrader();
+                        // 行情查询由底层状态机推进：不要在这里误判“未返回”而中断定时器
+                        if (trader) {
+                            MarketQueryTick(trader);
+                            if (!IsMarketQueryActive(trader)) {
+                                g_queryInFlight = FALSE;
+                                g_queryInFlightType = 0;
+                                KillTimer(g_hMainWnd, IDT_QUERY_TIMEOUT);
+                                return 0;
+                            }
+                        }
+                        SetTimer(g_hMainWnd, IDT_QUERY_TIMEOUT, 500, NULL);
+                        return 0;
+                    }
                     UpdateStatus("上一条查询未返回，请稍后再试");
                     g_queryInFlight = FALSE;
                     g_queryInFlightType = 0;
@@ -1740,41 +1787,27 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 return 0;
             }
             
-            // 行情查询后检查是否收到数据
-            if (wParam == 1001) {
+            // 行情订阅后检查是否收到数据
+            if (wParam == IDT_MD_SUB_CHECK) {
                 if (!g_hListViewQuery || !IsWindow(g_hListViewQuery)) {
                     MessageBox(g_hMainWnd, TEXT("ListView 未初始化或已销毁！"), TEXT("错误"), MB_ICONERROR | MB_OK);
                     CTPTrader* trader = GetActiveQueryTrader();
                 if (trader) {
                     CancelMarketQuery(trader);
                 }
-                KillTimer(g_hMainWnd, 1001);
+                KillTimer(g_hMainWnd, IDT_MD_SUB_CHECK);
                     return 0;
                 }
 
                 // 检查ListView是否有数据
                 int itemCount = ListView_GetItemCount(g_hListViewQuery);
                 if (itemCount == 0) {
-                    if (g_marketSubscribeMode) {
-                        MessageBox(g_hMainWnd,
-                                 TEXT("未收到行情订阅数据！\n\n可能的原因：\n1. 行情前置未连接成功\n2. 合约代码输入错误\n3. 当前非交易时间\n4. 账户无行情权限\n\n建议：\n- 检查行情前置地址\n- 检查合约代码是否正确\n- 确认当前是交易时间\n- 或者联系管理员开通行情权限"),
-                                 TEXT("行情订阅提示"),
-                                 MB_ICONWARNING | MB_OK);
-                    } else {
-                        MessageBox(g_hMainWnd,
-                                 TEXT("未收到行情数据！\n\n可能的原因：\n1. 该CTP柜台不支持通过交易接口查询行情\n2. 合约代码输入错误\n3. 当前非交易时间\n4. 需要使用行情API进行实时订阅\n\n建议：\n- 检查合约代码是否正确\n- 确认当前是交易时间\n- 或者联系管理员开通行情权限"),
-                                 TEXT("行情查询提示"),
-                                 MB_ICONWARNING | MB_OK);
-                    }
+                    MessageBox(g_hMainWnd,
+                             TEXT("未收到行情订阅数据！\n\n可能的原因：\n1. 行情前置未连接成功\n2. 合约代码输入错误\n3. 当前非交易时间\n4. 账户无行情权限\n\n建议：\n- 检查行情前置地址\n- 检查合约代码是否正确\n- 确认当前是交易时间\n- 或者联系管理员开通行情权限"),
+                             TEXT("行情订阅提示"),
+                             MB_ICONWARNING | MB_OK);
                 }
-                CTPTrader* trader = GetActiveQueryTrader();
-                if (trader && !g_marketSubscribeMode) {
-                    CancelMarketQuery(trader);
-                }
-                g_queryInFlight = FALSE;
-                g_queryInFlightType = 0;
-                KillTimer(g_hMainWnd, IDT_QUERY_TIMEOUT);
-                KillTimer(g_hMainWnd, 1001);
+                KillTimer(g_hMainWnd, IDT_MD_SUB_CHECK);
             }
             return 0;
         case WM_DESTROY:

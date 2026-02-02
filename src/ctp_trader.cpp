@@ -277,13 +277,47 @@ static void ExportCsv(const char* userID, const char* contentName, const char* d
 
 // 写入调试日志到 ctp_debug.log
 void LogMessage(const char* msg) {
-    FILE* f = fopen("ctp_debug.log", "a");
+    static char logPath[MAX_PATH] = {0};
+    if (logPath[0] == '\0') {
+        char modulePath[MAX_PATH] = {0};
+        if (GetModuleFileNameA(NULL, modulePath, MAX_PATH) > 0) {
+            char* lastSlash = strrchr(modulePath, '\\');
+            if (lastSlash) {
+                *lastSlash = '\0';
+                SafeFormat(logPath, sizeof(logPath), "%s\\ctp_debug.log", modulePath);
+            }
+        }
+        if (logPath[0] == '\0') {
+            strcpy(logPath, "ctp_debug.log");
+        }
+    }
+    char timeStr[64];
+    time_t now = time(NULL);
+    strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", localtime(&now));
+
+    FILE* f = fopen(logPath, "a");
     if (f) {
-        time_t now = time(NULL);
-        char timeStr[64];
-        strftime(timeStr, sizeof(timeStr), "%Y-%m-%d %H:%M:%S", localtime(&now));
         fprintf(f, "[%s] %s\n", timeStr, msg);
         fclose(f);
+    }
+
+    // 兜底：写到当前目录
+    FILE* f2 = fopen("ctp_debug.log", "a");
+    if (f2) {
+        fprintf(f2, "[%s] %s\n", timeStr, msg);
+        fclose(f2);
+    }
+
+    // 兜底：写到临时目录，便于排查日志路径问题
+    char tempPath[MAX_PATH] = {0};
+    if (GetTempPathA(MAX_PATH, tempPath) > 0) {
+        char tempLog[MAX_PATH] = {0};
+        SafeFormat(tempLog, sizeof(tempLog), "%sctp_debug.log", tempPath);
+        FILE* f3 = fopen(tempLog, "a");
+        if (f3) {
+            fprintf(f3, "[%s] %s\n", timeStr, msg);
+            fclose(f3);
+        }
     }
 }
 
@@ -336,6 +370,7 @@ public:
     bool marketBatchActive;
     int marketBatchStartRequestID;
     ULONGLONG lastMarketQueryTick;
+    std::map<std::string, ULONGLONG> marketRetryWaitTick;
     bool marketBatchCleared;
     std::map<int, std::string> marketReqMap;
     int marketRowIndex;
@@ -343,6 +378,13 @@ public:
     std::set<std::string> marketQueryExpected;
     std::set<std::string> marketQueryReceived;
     int marketRespLogCount;
+    std::map<std::string, int> marketRetryCount;
+    bool marketThrottleNotice;
+    ULONGLONG lastMarketStatusTick;
+    int marketStatusCounter;
+    std::map<std::string, int> marketStatus; // 0=pending 1=sent 2=ok 3=failed
+    std::string currentReqInst;
+    ULONGLONG currentReqSendTick;
     
     // 初始化 SPI 状态与同步对象
     TraderSpi() {
@@ -373,6 +415,17 @@ public:
         marketQueryExpected.clear();
         marketQueryReceived.clear();
         marketRespLogCount = 0;
+        marketRetryCount.clear();
+        marketRetryWaitTick.clear();
+        marketThrottleNotice = false;
+        lastMarketStatusTick = 0;
+        marketStatusCounter = 0;
+        marketStatus.clear();
+        currentReqInst.clear();
+        currentReqSendTick = 0;
+        marketStatus.clear();
+        currentReqInst.clear();
+        currentReqSendTick = 0;
         memset(brokerID, 0, sizeof(brokerID));
         memset(userID, 0, sizeof(userID));
         memset(password, 0, sizeof(password));
@@ -439,25 +492,74 @@ public:
         marketQueryExpected.clear();
         marketQueryReceived.clear();
         marketRespLogCount = 0;
+        marketRetryCount.clear();
+        marketThrottleNotice = false;
+        lastMarketStatusTick = 0;
+        marketStatusCounter = 0;
+        marketStatus.clear();
+        currentReqInst.clear();
+        currentReqSendTick = 0;
+        lastMarketQueryTick = 0;
     }
 
     bool HasPendingMarketQuery() const {
-        return marketBatchActive && marketQueryIndex < marketQueryQueue.size();
+        if (!marketBatchActive) return false;
+        for (std::map<std::string,int>::const_iterator it = marketStatus.begin(); it != marketStatus.end(); ++it) {
+            if (it->second == 0 || it->second == 1) return true;
+        }
+        return false;
+    }
+
+    bool IsMarketQueryActive() const {
+        return marketBatchActive;
     }
 
     int SendNextMarketQuery() {
         if (!pUserApi) return -1;
-        if (marketQueryIndex >= marketQueryQueue.size()) return 0;
+        // 找到下一个 pending 合约
         size_t total = marketQueryQueue.size();
-        size_t currentIndex = marketQueryIndex;
-        const std::string& inst = marketQueryQueue[marketQueryIndex++];
-
-        const int kMinIntervalMs = 200;
+        size_t currentIndex = 0;
+        std::string inst;
+        bool found = false;
         ULONGLONG now = GetTickCount64();
-        if (lastMarketQueryTick != 0 && now - lastMarketQueryTick < (ULONGLONG)kMinIntervalMs) {
-            Sleep((DWORD)(kMinIntervalMs - (now - lastMarketQueryTick)));
+        ULONGLONG earliestWait = 0;
+        for (size_t i = 0; i < marketQueryQueue.size(); ++i) {
+            const std::string& cand = marketQueryQueue[i];
+            int st = 0;
+            std::map<std::string,int>::iterator sit = marketStatus.find(cand);
+            if (sit != marketStatus.end()) st = sit->second;
+            if (st != 0) continue; // only pending
+            ULONGLONG waitUntil = 0;
+            std::map<std::string, ULONGLONG>::iterator wit = marketRetryWaitTick.find(cand);
+            if (wit != marketRetryWaitTick.end()) waitUntil = wit->second;
+            if (waitUntil != 0 && waitUntil > now) {
+                if (earliestWait == 0 || waitUntil < earliestWait) earliestWait = waitUntil;
+                continue; // not ready yet
+            }
+            inst = cand;
+            currentIndex = i;
+            found = true;
+            break;
         }
-        lastMarketQueryTick = GetTickCount64();
+        if (!found) {
+            if (earliestWait != 0) {
+                char msg[128];
+                SafeFormat(msg, sizeof(msg), "行情查询等待退避窗口，下一次可发送于+%u ms", (unsigned)(earliestWait - now));
+                LogMessage(msg);
+            }
+            return 0;
+        }
+
+        const int kMinIntervalMs = 500;
+        if (lastMarketQueryTick != 0) {
+            ULONGLONG delta = now - lastMarketQueryTick;
+            if (delta < (ULONGLONG)kMinIntervalMs) {
+                // 不要在 UI 线程 sleep；用退避窗口延后重试
+                marketRetryWaitTick[inst] = now + ((ULONGLONG)kMinIntervalMs - delta);
+                return 0;
+            }
+        }
+        marketRetryWaitTick.erase(inst);
         CThostFtdcQryDepthMarketDataField req = {0};
         if (!inst.empty()) {
             strncpy(req.InstrumentID, inst.c_str(), sizeof(req.InstrumentID) - 1);
@@ -466,43 +568,113 @@ public:
         int nextRequestID = requestID + 1;
         if (marketBatchStartRequestID == 0) marketBatchStartRequestID = nextRequestID;
         {
-            char msg[256];
-            size_t sent = currentIndex + 1;
-            size_t totalCount = total;
-            if (inst.empty()) {
-                SafeFormat(msg, sizeof(msg), "正在发送行情查询(全部)");
-            } else {
-                SafeFormat(msg, sizeof(msg), "正在发送行情查询(%Iu/%Iu): %s", (size_t)sent, (size_t)totalCount, inst.c_str());
+            ULONGLONG nowStatus = GetTickCount64();
+            if ((nowStatus - lastMarketStatusTick) > 600 || (marketStatusCounter++ % 3) == 0) {
+                char msg[256];
+                size_t sent = currentIndex + 1;
+                size_t totalCount = total;
+                if (inst.empty()) {
+                    SafeFormat(msg, sizeof(msg), "正在发送行情查询(全部)");
+                } else {
+                    SafeFormat(msg, sizeof(msg), "正在发送行情查询(%Iu/%Iu): %s", (size_t)sent, (size_t)totalCount, inst.c_str());
+                }
+                UpdateStatus(msg);
+                lastMarketStatusTick = nowStatus;
             }
-            UpdateStatus(msg);
         }
         int reqId = ++requestID;
         marketReqMap[reqId] = inst;
+        {
+            char msg[256];
+            SafeFormat(msg, sizeof(msg), "发送行情查询 req=%d, inst=%s", reqId, inst.empty() ? "全部" : inst.c_str());
+            LogMessage(msg);
+        }
+        lastMarketQueryTick = GetTickCount64();
         int ret = pUserApi->ReqQryDepthMarketData(&req, reqId);
         if (ret != 0) {
-            for (int i = 0; i < 3 && ret != 0; i++) {
-                Sleep(200);
-                int retryReqId = ++requestID;
-                marketReqMap[retryReqId] = inst;
-                ret = pUserApi->ReqQryDepthMarketData(&req, retryReqId);
+            // -2/-3 通常是请求频率或流量受限，稍后重试当前合约
+            if (ret == -2 || ret == -3) {
+                int& retry = marketRetryCount[inst];
+                retry++;
+                // 指数退避，避免一直触发 -3（流控）
+                ULONGLONG waitMs = 2000;
+                int exp = retry - 1;
+                if (exp < 0) exp = 0;
+                if (exp > 4) exp = 4;
+                waitMs = waitMs << exp; // 2s,4s,8s,16s,32s
+                if (waitMs > 30000) waitMs = 30000;
+                marketRetryWaitTick[inst] = GetTickCount64() + waitMs;
+                if (!marketThrottleNotice) {
+                    char msg[256];
+                    if (inst.empty()) {
+                        SafeFormat(msg, sizeof(msg), "行情查询过于频繁，稍后自动重试(全部)，错误码=%d", ret);
+                    } else {
+                        SafeFormat(msg, sizeof(msg), "行情查询过于频繁，稍后自动重试(%s)，错误码=%d", inst.c_str(), ret);
+                    }
+                    UpdateStatus(msg);
+                    LogMessage(msg);
+                    marketThrottleNotice = true;
+                }
+                if (retry > 5) {
+                    // 重试过多则跳过该合约
+                    marketRetryCount.erase(inst);
+                    marketStatus[inst] = 3;
+                    marketRetryWaitTick.erase(inst);
+                    currentReqInst.clear();
+                    currentReqSendTick = 0;
+                    if (HasPendingMarketQuery()) return SendNextMarketQuery();
+                    return 0;
+                }
+                return 0;
             }
-        }
-        if (ret != 0) {
-            char msg[256];
-            if (inst.empty()) {
-                SafeFormat(msg, sizeof(msg), "行情查询请求发送失败，合约=全部，错误码=%d", ret);
-            } else {
-                SafeFormat(msg, sizeof(msg), "行情查询请求发送失败，合约=%s，错误码=%d", inst.c_str(), ret);
+            {
+                char msg[256];
+                if (inst.empty()) {
+                    SafeFormat(msg, sizeof(msg), "行情查询请求发送失败，合约=全部，错误码=%d", ret);
+                } else {
+                    SafeFormat(msg, sizeof(msg), "行情查询请求发送失败，合约=%s，错误码=%d", inst.c_str(), ret);
+                }
+                UpdateStatus(msg);
+                LogMessage(msg);
             }
-            UpdateStatus(msg);
-            if (HasPendingMarketQuery()) {
-                return SendNextMarketQuery();
-            }
-            ClearMarketQueryQueue();
-            EndQuery(3);
+            marketStatus[inst] = 3;
+            marketRetryWaitTick.erase(inst);
+            currentReqInst.clear();
+            currentReqSendTick = 0;
+            if (HasPendingMarketQuery()) return SendNextMarketQuery();
             return 0;
         }
+        // 发送成功后推进索引
+        marketRetryCount.erase(inst);
+        marketThrottleNotice = false;
+        marketStatus[inst] = 1;
+        currentReqInst = inst;
+        currentReqSendTick = GetTickCount64();
         return 0;
+    }
+
+    void FinishMarketBatch() {
+        marketBatchActive = false;
+        currentReqInst.clear();
+        currentReqSendTick = 0;
+        size_t expected = marketQueryExpected.size();
+        size_t received = marketQueryReceived.size();
+        size_t failed = 0;
+        for (std::map<std::string,int>::const_iterator it = marketStatus.begin(); it != marketStatus.end(); ++it) {
+            if (it->second != 2) failed++;
+        }
+        if (marketQueryAll) {
+            UpdateStatus("行情查询完成");
+            LogMessage("行情查询完成");
+        } else {
+            char msg[256];
+            SafeFormat(msg, sizeof(msg), "行情查询完成，期望=%u，成功=%u，失败/缺失=%u", (unsigned)expected, (unsigned)received, (unsigned)failed);
+            UpdateStatus(msg);
+            LogMessage(msg);
+        }
+        ExportMarketIfReady();
+        ClearMarketQueryQueue();
+        EndQuery(3);
     }
 
     int StartMarketQueryBatch(const std::vector<std::string>& instruments) {
@@ -541,14 +713,18 @@ public:
             LogMessage("行情查询列表: 全部");
         }
         marketQueryQueue = instruments;
-        marketQueryIndex = 0;
         marketBatchActive = true;
         marketBatchStartRequestID = 0;
-        // 点击查询时先清空列表
+        // 点击查询时先清空列表，列头在回调里统一初始化
         ClearListView();
-        marketBatchCleared = true;
+        marketBatchCleared = false;
         marketRowIndex = 0;
         lastMarketQueryTick = 0;
+        marketRetryWaitTick.clear();
+        marketStatus.clear();
+        for (size_t i = 0; i < marketQueryQueue.size(); ++i) {
+            marketStatus[marketQueryQueue[i]] = 0;
+        }
         int ret = SendNextMarketQuery();
         if (ret != 0) {
             ClearMarketQueryQueue();
@@ -999,6 +1175,11 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
         SafeFormat(msg, sizeof(msg), "查询行情失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
         UpdateStatus(msg);
         if (gbkErrorMsg) delete[] gbkErrorMsg;
+        if (!currentReqInst.empty()) {
+            marketStatus[currentReqInst] = 3;
+            currentReqInst.clear();
+            currentReqSendTick = 0;
+        }
         if (HasPendingMarketQuery()) {
             int ret = SendNextMarketQuery();
             if (ret != 0) {
@@ -1006,8 +1187,7 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
                 EndQuery(3);
             }
         } else {
-            ClearMarketQueryQueue();
-            EndQuery(3);
+            FinishMarketBatch();
         }
         return;
     }
@@ -1325,6 +1505,27 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
         row++;
     }
     if (bIsLast) {
+        // 标记当前请求状态
+        std::string inst;
+        std::map<int, std::string>::const_iterator mit = marketReqMap.find(nRequestID);
+        if (mit != marketReqMap.end()) inst = mit->second;
+        {
+            char msg[256];
+            SafeFormat(msg, sizeof(msg), "行情响应结束 req=%d inst=%s accept=%d", nRequestID, inst.empty() ? "?" : inst.c_str(), acceptMarketRow ? 1 : 0);
+            LogMessage(msg);
+        }
+        if (acceptMarketRow) {
+            if (!inst.empty()) marketStatus[inst] = 2;
+            else marketStatus[""] = 2;
+        } else {
+            if (!inst.empty()) marketStatus[inst] = 3;
+            else marketStatus[""] = 3;
+        }
+        marketRetryWaitTick.erase(inst);
+        if (!currentReqInst.empty() && currentReqInst == inst) {
+            currentReqInst.clear();
+            currentReqSendTick = 0;
+        }
         if (HasPendingMarketQuery()) {
             int ret = SendNextMarketQuery();
             if (ret != 0) {
@@ -1332,37 +1533,7 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
                 EndQuery(3);
             }
         } else {
-            if (marketQueryAll) {
-                UpdateStatus("行情查询完成");
-                LogMessage("行情查询完成");
-            } else {
-                size_t expected = marketQueryExpected.size();
-                size_t received = marketQueryReceived.size();
-                size_t missing = (expected > received) ? (expected - received) : 0;
-                char msg[256];
-                SafeFormat(msg, sizeof(msg), "行情查询完成，期望=%u，已返回=%u，未返回=%u", (unsigned)expected, (unsigned)received, (unsigned)missing);
-                UpdateStatus(msg);
-                LogMessage(msg);
-                if (missing > 0) {
-                    std::string summary;
-                    size_t shown = 0;
-                    for (std::set<std::string>::const_iterator it = marketQueryExpected.begin();
-                         it != marketQueryExpected.end(); ++it) {
-                        if (marketQueryReceived.find(*it) != marketQueryReceived.end()) continue;
-                        if (!summary.empty()) summary += ", ";
-                        summary += *it;
-                        shown++;
-                        if (shown >= 4) break;
-                    }
-                    if (missing > shown) summary += " ...";
-                    SafeFormat(msg, sizeof(msg), "未返回合约: %s", summary.c_str());
-                    UpdateStatus(msg);
-                    LogMessage(msg);
-                }
-            }
-            ExportMarketIfReady();
-            ClearMarketQueryQueue();
-            EndQuery(3);
+            FinishMarketBatch();
         }
     }
 }
@@ -2102,6 +2273,11 @@ struct CTPTrader {
 // 创建交易对象并初始化 SPI
 extern "C" CTPTrader* CreateCTPTrader() {
     LogMessage("CreateCTPTrader called");
+    {
+        char buildMsg[128];
+        SafeFormat(buildMsg, sizeof(buildMsg), "Build: %s %s", __DATE__, __TIME__);
+        LogMessage(buildMsg);
+    }
     CTPTrader* trader = NULL;
     try {
         trader = new CTPTrader();
@@ -2378,6 +2554,49 @@ extern "C" int QueryMarketDataBatch(CTPTrader* trader, const char* instrumentsCs
     insts.push_back(std::string());
     trader->pSpi->UpdateStatus("正在查询全部行情...");
     return trader->pSpi->StartMarketQueryBatch(insts);
+}
+
+extern "C" int MarketQueryTick(CTPTrader* trader) {
+    if (!trader || !trader->pSpi) return 0;
+    TraderSpi* pSpi = trader->pSpi;
+    if (!pSpi->HasPendingMarketQuery()) return 0;
+    ULONGLONG now = GetTickCount64();
+    const ULONGLONG kTimeoutMs = 3000;
+    // 尚无在途请求，直接发送下一条
+    if (pSpi->currentReqInst.empty()) {
+        LogMessage("MarketQueryTick: no in-flight, send next");
+        pSpi->SendNextMarketQuery();
+        return 1;
+    }
+    // 有在途请求，检测超时
+    if (pSpi->currentReqSendTick != 0 && (now - pSpi->currentReqSendTick) < kTimeoutMs) {
+        return 0;
+    }
+    // 超时：标记失败并继续下一条
+    std::string inst = pSpi->currentReqInst;
+    pSpi->marketStatus[inst] = 3;
+    pSpi->marketRetryWaitTick.erase(inst);
+    pSpi->currentReqInst.clear();
+    pSpi->currentReqSendTick = 0;
+    char msg[256];
+    if (inst.empty()) {
+        SafeFormat(msg, sizeof(msg), "行情查询超时，跳过: 全部");
+    } else {
+        SafeFormat(msg, sizeof(msg), "行情查询超时，跳过: %s", inst.c_str());
+    }
+    pSpi->UpdateStatus(msg);
+    LogMessage(msg);
+    if (pSpi->HasPendingMarketQuery()) {
+        pSpi->SendNextMarketQuery();
+    } else {
+        pSpi->FinishMarketBatch();
+    }
+    return 1;
+}
+
+extern "C" int IsMarketQueryActive(CTPTrader* trader) {
+    if (!trader || !trader->pSpi) return 0;
+    return trader->pSpi->IsMarketQueryActive() ? 1 : 0;
 }
 
 extern "C" int QueryInstrument(CTPTrader* trader, const char* instrumentID) {
