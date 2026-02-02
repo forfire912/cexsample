@@ -99,7 +99,7 @@ static int IsDelimW(WCHAR c) {
 #define CONNECT_RETRY_DELAY_MS 10000
 #define LOGIN_POLL_INTERVAL_MS 500
 #define LOGIN_POLL_TIMEOUT_MS 20000
-#define QUERY_MAX_DEFAULT 100
+#define QUERY_MAX_DEFAULT 200
 #define QUERY_MAX_LIMIT 10000
 
 HINSTANCE g_hInst;
@@ -192,6 +192,7 @@ static void GetActiveQueryMdFrontAddr(char* out, int outSize);
 static void SyncInstrumentTextFrom(HWND srcEdit);
 static void SetInstrumentTextBoth(const WCHAR* text);
 static BOOL BlockIfQueryInFlight(void);
+static void ApplyQueryMaxRecordsFromEdit(HWND hEdit);
 
 static BOOL ImportInstrumentsFromExcel(HWND owner);
 static BOOL ExportLatestToExcel(HWND owner);
@@ -199,11 +200,62 @@ static void UpdateStatusOnUiThread(const char* msg);
 static int SafeStrnlenA(const char* s, int maxLen);
 static void SafeFormatA(char* buf, size_t size, const char* fmt, ...);
 static int FindListViewColumn(HWND hListView, const WCHAR* name);
+static void LoadConfigFromIni(void);
 
 static int ClampQueryMaxRecords(int value) {
     if (value < 1) return 1;
     if (value > QUERY_MAX_LIMIT) return QUERY_MAX_LIMIT;
     return value;
+}
+
+static BOOL GetConfigPath(WCHAR* outPath, size_t outCount) {
+    if (!outPath || outCount == 0) return FALSE;
+    DWORD n = GetModuleFileNameW(NULL, outPath, (DWORD)outCount);
+    if (n == 0 || n >= outCount) return FALSE;
+    for (DWORD i = n; i > 0; i--) {
+        if (outPath[i - 1] == L'\\' || outPath[i - 1] == L'/') {
+            outPath[i] = 0;
+            break;
+        }
+    }
+    if (!outPath[0]) return FALSE;
+    if (wcslen(outPath) + 10 >= outCount) return FALSE;
+    wcscat_s(outPath, outCount, L"config.ini");
+    return TRUE;
+}
+
+static void LoadConfigFromIni(void) {
+    WCHAR path[MAX_PATH] = {0};
+    if (!GetConfigPath(path, _countof(path))) return;
+
+    WCHAR buf[256] = {0};
+
+    GetPrivateProfileStringW(L"Front", L"TradingFront", L"", buf, _countof(buf), path);
+    if (buf[0] && g_hEditFrontAddr) SetWindowTextW(g_hEditFrontAddr, buf);
+
+    GetPrivateProfileStringW(L"Front", L"MarketFront", L"", buf, _countof(buf), path);
+    if (buf[0] && g_hEditMdFrontAddr) SetWindowTextW(g_hEditMdFrontAddr, buf);
+
+    GetPrivateProfileStringW(L"Front", L"AuthCode", L"", buf, _countof(buf), path);
+    if (buf[0] && g_hEditAuthCode) SetWindowTextW(g_hEditAuthCode, buf);
+
+    GetPrivateProfileStringW(L"Front", L"BrokerID", L"", buf, _countof(buf), path);
+    if (buf[0] && g_hEditBrokerID) SetWindowTextW(g_hEditBrokerID, buf);
+
+    GetPrivateProfileStringW(L"Account", L"UserID", L"", buf, _countof(buf), path);
+    if (buf[0] && g_hEditUserID) SetWindowTextW(g_hEditUserID, buf);
+
+    GetPrivateProfileStringW(L"Account", L"Password", L"", buf, _countof(buf), path);
+    if (buf[0] && g_hEditPassword) SetWindowTextW(g_hEditPassword, buf);
+
+    int qmax = GetPrivateProfileIntW(L"Settings", L"QueryMax", QUERY_MAX_DEFAULT, path);
+    qmax = ClampQueryMaxRecords(qmax);
+    if (g_hEditQueryMax) {
+        WCHAR tmp[32];
+        swprintf_s(tmp, _countof(tmp), L"%d", qmax);
+        SetWindowTextW(g_hEditQueryMax, tmp);
+        ApplyQueryMaxRecordsFromEdit(g_hEditQueryMax);
+    }
 }
 
 static void ApplyQueryMaxRecordsFromEdit(HWND hEdit) {
@@ -1039,12 +1091,12 @@ void CreateSettingsPanel(HWND hParent, HINSTANCE hInstance) {
 
     CreateWindow(TEXT("STATIC"), TEXT("最大记录数:"), WS_VISIBLE | WS_CHILD,
                  x, y, 80, 22, g_hSettingsPanel, NULL, hInstance, NULL);
-    g_hEditQueryMax = CreateWindow(TEXT("EDIT"), TEXT("100"),
+    g_hEditQueryMax = CreateWindow(TEXT("EDIT"), TEXT("200"),
                  WS_VISIBLE | WS_CHILD | WS_BORDER | ES_NUMBER,
                  x+85, y-2, 80, 24, g_hSettingsPanel, (HMENU)IDC_EDIT_QUERY_MAX, hInstance, NULL);
     SendMessage(g_hEditQueryMax, EM_LIMITTEXT, 5, 0);
     ApplyQueryMaxRecordsFromEdit(g_hEditQueryMax);
-    CreateWindow(TEXT("STATIC"), TEXT("默认100，最大10000"), WS_VISIBLE | WS_CHILD,
+    CreateWindow(TEXT("STATIC"), TEXT("默认200，最大10000"), WS_VISIBLE | WS_CHILD,
                  x+175, y, 150, 22, g_hSettingsPanel, NULL, hInstance, NULL);
 
     y += 40;
@@ -1159,6 +1211,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         case WM_CREATE:
             // 创建主窗口 UI，并初始化交易对象
             CreateMainWindow(hWnd, g_hInst);
+            // 读取配置文件并回填界面
+            LoadConfigFromIni();
             // 仅创建正式 Trader，并挂接回调
             g_pTraderProd = CreateCTPTrader();
             if (g_pTraderProd) {
