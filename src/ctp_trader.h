@@ -6,6 +6,24 @@
 #include <windows.h>
 
 #define WM_APP_MD_UPDATE (WM_APP + 101)
+#define WM_APP_STATUS_UPDATE (WM_APP + 102)
+#define WM_APP_LISTVIEW_OP (WM_APP + 103)
+
+typedef enum ListViewOpType {
+    LV_OP_CLEAR = 1,
+    LV_OP_ADD_COLUMN = 2,
+    LV_OP_ADD_ITEM = 3
+} ListViewOpType;
+
+typedef struct ListViewOp {
+    int op;
+    HWND hListView;
+    int row;
+    int col;
+    int width;
+    WCHAR* wtext; // for LV_OP_ADD_COLUMN
+    char* text;   // UTF-8 for LV_OP_ADD_ITEM
+} ListViewOp;
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +62,9 @@ void SetListView(CTPTrader* trader, HWND hListView);
 
 // 设置状态回调
 void SetStatusCallback(CTPTrader* trader, StatusCallback callback);
+
+// 写入调试日志
+void LogMessage(const char* msg);
 
 // 设置每个查询最多输出的记录数（默认100，最大10000）
 void SetQueryMaxRecords(int maxRecords);

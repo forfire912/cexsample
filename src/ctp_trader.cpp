@@ -18,8 +18,46 @@
 #include <map>
 #include <set>
 #include <ctype.h>
+#include <stdarg.h>
+
+#ifndef IDC_LISTVIEW_QUERY
+#define IDC_LISTVIEW_QUERY 1106
+#endif
 
 static int g_queryMaxRecords = 100;
+static int g_listViewLogCount = 0;
+
+static void SafeFormat(char* buf, size_t size, const char* fmt, ...) {
+    if (!buf || size == 0) return;
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf_s(buf, size, _TRUNCATE, fmt, ap);
+    va_end(ap);
+}
+
+static void MaskId(const char* id, char* out, size_t outSize) {
+    if (!out || outSize == 0) return;
+    if (!id || !id[0]) {
+        out[0] = '\0';
+        return;
+    }
+    size_t len = strlen(id);
+    if (len <= 2) {
+        SafeFormat(out, outSize, "**");
+        return;
+    }
+    const char* tail = id + (len - 2);
+    SafeFormat(out, outSize, "***%s", tail);
+}
+
+static ListViewOp* AllocListViewOp(int op, HWND hListView) {
+    ListViewOp* item = (ListViewOp*)malloc(sizeof(ListViewOp));
+    if (!item) return NULL;
+    memset(item, 0, sizeof(ListViewOp));
+    item->op = op;
+    item->hListView = hListView;
+    return item;
+}
 
 static int ClampQueryMaxRecords(int value) {
     if (value < 1) return 1;
@@ -157,7 +195,7 @@ static void GetTodayYYYYMMDD(char* buf, size_t len) {
     if (!buf || len < 9) return;
     time_t now = time(NULL);
     struct tm* t = localtime(&now);
-    sprintf(buf, "%04d%02d%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
+    SafeFormat(buf, len, "%04d%02d%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
 }
 
 // 获取当前时间（YYYYMMDDHHMMSS）
@@ -165,7 +203,7 @@ static void GetNowYYYYMMDDHHMMSS(char* buf, size_t len) {
     if (!buf || len < 15) return;
     time_t now = time(NULL);
     struct tm* t = localtime(&now);
-    sprintf(buf, "%04d%02d%02d%02d%02d%02d",
+    SafeFormat(buf, len, "%04d%02d%02d%02d%02d%02d",
             t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
             t->tm_hour, t->tm_min, t->tm_sec);
 }
@@ -206,7 +244,7 @@ static void ExportCsv(const char* userID, const char* contentName, const char* d
     if (headers.empty()) return;
     EnsureDir("export");
     char nameUtf8[260];
-    sprintf(nameUtf8, "export\\%s_%s_%s.csv", userID, contentName, dateStr);
+    SafeFormat(nameUtf8, sizeof(nameUtf8), "export\\%s_%s_%s.csv", userID, contentName, dateStr);
     std::wstring wpath = Utf8ToWide(nameUtf8);
     // 使用宽路径打开文件（UTF-8 转宽字符）
     FILE* f = _wfopen(wpath.c_str(), L"wb");
@@ -255,6 +293,7 @@ public:
     // 交易 API 句柄与 UI/状态回调
     CThostFtdcTraderApi* pUserApi;
     HWND hListView;
+    HWND hMainWnd;
     StatusCallback statusCallback;
     char brokerID[11];
     char userID[16];
@@ -270,6 +309,9 @@ public:
     bool isQueryingMarket;
     bool isQueryingInstrument;
     bool isOptionQuery;
+    bool pauseReconnect;
+    ULONGLONG lastDisconnectTick;
+    int disconnectBurst;
     CRITICAL_SECTION queryLock;
     CRITICAL_SECTION listViewLock;
     
@@ -306,6 +348,7 @@ public:
     TraderSpi() {
         pUserApi = NULL;
         hListView = NULL;
+        hMainWnd = NULL;
         statusCallback = NULL;
         requestID = 0;
         isConnected = false;
@@ -316,6 +359,9 @@ public:
         isQueryingMarket = false;
         isQueryingInstrument = false;
         isOptionQuery = false;
+        pauseReconnect = false;
+        lastDisconnectTick = 0;
+        disconnectBurst = 0;
         marketQueryIndex = 0;
         marketBatchActive = false;
         marketBatchStartRequestID = 0;
@@ -424,9 +470,9 @@ public:
             size_t sent = currentIndex + 1;
             size_t totalCount = total;
             if (inst.empty()) {
-                sprintf(msg, "正在发送行情查询(全部)");
+                SafeFormat(msg, sizeof(msg), "正在发送行情查询(全部)");
             } else {
-                sprintf(msg, "正在发送行情查询(%Iu/%Iu): %s", (size_t)sent, (size_t)totalCount, inst.c_str());
+                SafeFormat(msg, sizeof(msg), "正在发送行情查询(%Iu/%Iu): %s", (size_t)sent, (size_t)totalCount, inst.c_str());
             }
             UpdateStatus(msg);
         }
@@ -444,9 +490,9 @@ public:
         if (ret != 0) {
             char msg[256];
             if (inst.empty()) {
-                sprintf(msg, "行情查询请求发送失败，合约=全部，错误码=%d", ret);
+                SafeFormat(msg, sizeof(msg), "行情查询请求发送失败，合约=全部，错误码=%d", ret);
             } else {
-                sprintf(msg, "行情查询请求发送失败，合约=%s，错误码=%d", inst.c_str(), ret);
+                SafeFormat(msg, sizeof(msg), "行情查询请求发送失败，合约=%s，错误码=%d", inst.c_str(), ret);
             }
             UpdateStatus(msg);
             if (HasPendingMarketQuery()) {
@@ -486,7 +532,7 @@ public:
                     shown++;
                 }
                 if (marketQueryExpected.size() > shown) summary += " ...";
-                sprintf(msg, "行情查询列表: %s (共%u)", summary.c_str(), (unsigned)marketQueryExpected.size());
+                SafeFormat(msg, sizeof(msg), "行情查询列表: %s (共%u)", summary.c_str(), (unsigned)marketQueryExpected.size());
                 UpdateStatus(msg);
                 LogMessage(msg);
             }
@@ -568,68 +614,110 @@ public:
     
     // 清空 ListView 内容与列头
     void ClearListView() {
-        EnterCriticalSection(&listViewLock);
-        HWND target = hListView;
-        if (target && IsWindow(target)) {
-            ListView_DeleteAllItems(target);
-            while (ListView_DeleteColumn(target, 0));
+        if (!hListView && hMainWnd) {
+            hListView = GetDlgItem(hMainWnd, IDC_LISTVIEW_QUERY);
         }
-        LeaveCriticalSection(&listViewLock);
+        HWND target = hListView;
+        if (!hMainWnd && target) {
+            hMainWnd = GetAncestor(target, GA_ROOT);
+        }
+        HWND host = hMainWnd;
+        if (!target || !host) {
+            if (g_listViewLogCount < 5) {
+                LogMessage("ListView Clear skipped: missing target/host");
+                g_listViewLogCount++;
+            }
+            return;
+        }
+        ListViewOp* op = AllocListViewOp(LV_OP_CLEAR, target);
+        if (!op) return;
+        if (!PostMessage(host, WM_APP_LISTVIEW_OP, 0, (LPARAM)op)) {
+            free(op);
+            if (g_listViewLogCount < 5) {
+                LogMessage("ListView Clear PostMessage failed");
+                g_listViewLogCount++;
+            }
+        }
     }
 
     // 统一的列头添加函数，直接使用宽字符串和 SendMessage
     // 清空 ListView 内容与列头
     void AddColumn(int col, const WCHAR* text, int width) {
-        EnterCriticalSection(&listViewLock);
+        if (!hListView && hMainWnd) {
+            hListView = GetDlgItem(hMainWnd, IDC_LISTVIEW_QUERY);
+        }
         HWND target = hListView;
-        if (!target || !IsWindow(target)) {
-            LeaveCriticalSection(&listViewLock);
+        if (!hMainWnd && target) {
+            hMainWnd = GetAncestor(target, GA_ROOT);
+        }
+        HWND host = hMainWnd;
+        if (!target || !host || !text) {
+            if (g_listViewLogCount < 5) {
+                LogMessage("ListView AddColumn skipped: missing target/host/text");
+                g_listViewLogCount++;
+            }
             return;
         }
-        LVCOLUMNW lvc = {0};
-        lvc.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
-        lvc.fmt = LVCFMT_LEFT;
-        lvc.cx = width;
-        lvc.pszText = (LPWSTR)text;
-        SendMessage(target, LVM_INSERTCOLUMNW, col, (LPARAM)&lvc);
-        LeaveCriticalSection(&listViewLock);
+        ListViewOp* op = AllocListViewOp(LV_OP_ADD_COLUMN, target);
+        if (!op) return;
+        op->col = col;
+        op->width = width;
+        size_t len = wcslen(text) + 1;
+        op->wtext = (WCHAR*)malloc(len * sizeof(WCHAR));
+        if (!op->wtext) {
+            free(op);
+            return;
+        }
+        memcpy(op->wtext, text, len * sizeof(WCHAR));
+        if (!PostMessage(host, WM_APP_LISTVIEW_OP, 0, (LPARAM)op)) {
+            free(op->wtext);
+            free(op);
+            if (g_listViewLogCount < 5) {
+                LogMessage("ListView AddColumn PostMessage failed");
+                g_listViewLogCount++;
+            }
+        }
     }
     
     // 统一添加列表项的函数
     // 输入的文本应该是 UTF-8 编码（源文件和 CTP 消息都已转为 UTF-8）
     // 添加/更新 ListView 单元格（UTF-8->宽字符）
     void AddItem(int row, int col, const char* text) {
-        EnterCriticalSection(&listViewLock);
+        if (!hListView && hMainWnd) {
+            hListView = GetDlgItem(hMainWnd, IDC_LISTVIEW_QUERY);
+        }
         HWND target = hListView;
-        if (!target || !IsWindow(target)) {
-            LeaveCriticalSection(&listViewLock);
+        if (!hMainWnd && target) {
+            hMainWnd = GetAncestor(target, GA_ROOT);
+        }
+        HWND host = hMainWnd;
+        if (!target || !host) {
+            if (g_listViewLogCount < 5) {
+                LogMessage("ListView AddItem skipped: missing target/host");
+                g_listViewLogCount++;
+            }
             return;
         }
         const char* safeText = text ? text : "";
-        WCHAR wtext[256];
-        // Limit input length to avoid reading past unterminated strings
-        int inLen = SafeStrnlen(safeText, 240);
-        int wlen = MultiByteToWideChar(CP_UTF8, 0, safeText, inLen, wtext, 255);
-        if (wlen == 0) {
-            wlen = MultiByteToWideChar(CP_ACP, 0, safeText, inLen, wtext, 255);
+        ListViewOp* op = AllocListViewOp(LV_OP_ADD_ITEM, target);
+        if (!op) return;
+        op->row = row;
+        op->col = col;
+        size_t len = strlen(safeText) + 1;
+        op->text = (char*)malloc(len);
+        if (!op->text) {
+            free(op);
+            return;
         }
-        if (wlen < 0) wlen = 0;
-        wtext[wlen] = L'\0';
-        // 第 0 列需要插入新行
-        if (col == 0) {
-            LVITEMW lvi = {0};
-            lvi.mask = LVIF_TEXT;
-            lvi.iItem = row;
-            lvi.iSubItem = 0;
-            lvi.pszText = wtext;
-            SendMessage(target, LVM_INSERTITEMW, 0, (LPARAM)&lvi);
-        } else {
-            LVITEMW lvi2 = {0};
-            lvi2.iSubItem = col;
-            lvi2.pszText = wtext;
-            SendMessage(target, LVM_SETITEMTEXTW, row, (LPARAM)&lvi2);
+        memcpy(op->text, safeText, len);
+        if (!PostMessage(host, WM_APP_LISTVIEW_OP, 0, (LPARAM)op)) {
+            free(op->text);
+            free(op);
+            if (g_listViewLogCount < 5) {
+                LogMessage("ListView AddItem PostMessage failed");
+                g_listViewLogCount++;
+            }
         }
-        LeaveCriticalSection(&listViewLock);
     }
     
     virtual void OnFrontConnected() {
@@ -652,10 +740,28 @@ public:
         EndQuery(2);
         EndQuery(3);
         EndQuery(4);
+        if (!pauseReconnect) {
+            ULONGLONG now = GetTickCount64();
+            if (lastDisconnectTick != 0 && (now - lastDisconnectTick) <= 3000) {
+                disconnectBurst++;
+            } else {
+                disconnectBurst = 1;
+            }
+            lastDisconnectTick = now;
+            if (disconnectBurst >= 3) {
+                pauseReconnect = true;
+                if (pUserApi) {
+                    pUserApi->RegisterSpi(NULL);
+                    pUserApi->Release();
+                    pUserApi = NULL;
+                }
+                UpdateStatus("登录未成功且连接频繁断开，已暂停自动重连，请检查账号/前置后手动重连。");
+            }
+        }
         char msg[128];
-        sprintf(msg, "OnFrontDisconnected: reason=%d", nReason);
+        SafeFormat(msg, sizeof(msg), "OnFrontDisconnected: reason=%d", nReason);
         LogMessage(msg);
-        sprintf(msg, "连接断开，原因代码: %d", nReason);
+        SafeFormat(msg, sizeof(msg), "连接断开，原因代码: %d", nReason);
         UpdateStatus(msg);
     }
     
@@ -664,7 +770,7 @@ public:
         if (pRspInfo && pRspInfo->ErrorID != 0) {
             char msg[256];
             char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-            sprintf(msg, "认证失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+            SafeFormat(msg, sizeof(msg), "认证失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
             UpdateStatus(msg);
             if (gbkErrorMsg) delete[] gbkErrorMsg;
             return;
@@ -683,14 +789,14 @@ public:
         if (pRspInfo && pRspInfo->ErrorID != 0) {
             char msg[256];
             char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-            sprintf(msg, "登录失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+            SafeFormat(msg, sizeof(msg), "登录失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
             UpdateStatus(msg);
             if (gbkErrorMsg) delete[] gbkErrorMsg;
             return;
         }
         isLoggedIn = true;
         char msg[256];
-        sprintf(msg, "登录成功！交易日: %s", pRspUserLogin ? pRspUserLogin->TradingDay : "未知");
+        SafeFormat(msg, sizeof(msg), "登录成功！交易日: %s", pRspUserLogin ? pRspUserLogin->TradingDay : "未知");
         UpdateStatus(msg);
         
         // 登录成功后，自动确认结算结果
@@ -704,7 +810,7 @@ public:
         if (pRspInfo && pRspInfo->ErrorID != 0) {
             char msg[256];
             char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-            sprintf(msg, "结算单确认失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+            SafeFormat(msg, sizeof(msg), "结算单确认失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
             UpdateStatus(msg);
             if (gbkErrorMsg) delete[] gbkErrorMsg;
         } else {
@@ -731,7 +837,7 @@ void TraderSpi::OnRspQryOrder(CThostFtdcOrderField *pOrder, CThostFtdcRspInfoFie
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[256];
         char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-        sprintf(msg, "查询委托失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+        SafeFormat(msg, sizeof(msg), "查询委托失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
         UpdateStatus(msg);
         if (gbkErrorMsg) delete[] gbkErrorMsg;
         EndQuery(1);
@@ -812,7 +918,7 @@ void TraderSpi::OnRspQryInvestorPosition(CThostFtdcInvestorPositionField *pInves
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[256];
         char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-        sprintf(msg, "查询持仓失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+        SafeFormat(msg, sizeof(msg), "查询持仓失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
         UpdateStatus(msg);
         if (gbkErrorMsg) delete[] gbkErrorMsg;
         EndQuery(2);
@@ -890,7 +996,7 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[256];
         char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-        sprintf(msg, "查询行情失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+        SafeFormat(msg, sizeof(msg), "查询行情失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
         UpdateStatus(msg);
         if (gbkErrorMsg) delete[] gbkErrorMsg;
         if (HasPendingMarketQuery()) {
@@ -1037,7 +1143,7 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
                     acceptMarketRow = false;
                     if (marketRespLogCount < 20) {
                         char msg[256];
-                        sprintf(msg, "行情回报不匹配: req=%d, expect=%s, got=%s", nRequestID, expect.c_str(), got);
+                        SafeFormat(msg, sizeof(msg), "行情回报不匹配: req=%d, expect=%s, got=%s", nRequestID, expect.c_str(), got);
                         LogMessage(msg);
                         marketRespLogCount++;
                     }
@@ -1068,7 +1174,7 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
         rowData.push_back(tradingDay);
         {
             char reqBuf[16];
-            sprintf(reqBuf, "%d", nRequestID);
+            SafeFormat(reqBuf, sizeof(reqBuf), "%d", nRequestID);
             AddItem(row, col++, reqBuf);
             rowData.push_back(reqBuf);
         }
@@ -1234,7 +1340,7 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
                 size_t received = marketQueryReceived.size();
                 size_t missing = (expected > received) ? (expected - received) : 0;
                 char msg[256];
-                sprintf(msg, "行情查询完成，期望=%u，已返回=%u，未返回=%u", (unsigned)expected, (unsigned)received, (unsigned)missing);
+                SafeFormat(msg, sizeof(msg), "行情查询完成，期望=%u，已返回=%u，未返回=%u", (unsigned)expected, (unsigned)received, (unsigned)missing);
                 UpdateStatus(msg);
                 LogMessage(msg);
                 if (missing > 0) {
@@ -1249,7 +1355,7 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
                         if (shown >= 4) break;
                     }
                     if (missing > shown) summary += " ...";
-                    sprintf(msg, "未返回合约: %s", summary.c_str());
+                    SafeFormat(msg, sizeof(msg), "未返回合约: %s", summary.c_str());
                     UpdateStatus(msg);
                     LogMessage(msg);
                 }
@@ -1318,9 +1424,9 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
         char msg[256];
         char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
         if (isOptionQuery) {
-            sprintf(msg, "查询期权失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+            SafeFormat(msg, sizeof(msg), "查询期权失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
         } else {
-            sprintf(msg, "查询合约失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+            SafeFormat(msg, sizeof(msg), "查询合约失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
         }
         UpdateStatus(msg);
         if (gbkErrorMsg) delete[] gbkErrorMsg;
@@ -1465,7 +1571,7 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
                 time_t now = time(NULL);
                 struct tm* t = localtime(&now);
                 char today[9];
-                sprintf(today, "%04d%02d%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
+                SafeFormat(today, sizeof(today), "%04d%02d%02d", t->tm_year + 1900, t->tm_mon + 1, t->tm_mday);
                 if (strlen(pInstrument->ExpireDate) > 0 && 
                     strcmp(pInstrument->ExpireDate, today) >= 0 &&
                     IsMainContract(pInstrument->InstrumentID)) {
@@ -1571,10 +1677,10 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
             FormatInt64(buf, instruments[i].minLimitOrderVolume);
             AddItem(i, col++, buf);
             rowData.push_back(buf);
-            sprintf(buf, "%d", instruments[i].volumeMultiple);
+            SafeFormat(buf, sizeof(buf), "%d", instruments[i].volumeMultiple);
             AddItem(i, col++, buf);
             rowData.push_back(buf);
-            sprintf(buf, "%.4f", instruments[i].priceTick);
+            SafeFormat(buf, sizeof(buf), "%.4f", instruments[i].priceTick);
             AddItem(i, col++, buf);
             rowData.push_back(buf);
             AddItem(i, col++, instruments[i].createDate);
@@ -1629,10 +1735,10 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
         // 显示统计信息
         char msg[256];
         if (isOptionQuery) {
-            sprintf(msg, "期权查询完成，总合约数: %d，已显示: %d（按到期日排序）",
+            SafeFormat(msg, sizeof(msg), "期权查询完成，总合约数: %d，已显示: %d（按到期日排序）",
                     totalCount, displayCount);
         } else {
-            sprintf(msg, "主力合约查询完成，总合约数: %d，主力合约: %d，已显示: %d（按到期日排序）",
+            SafeFormat(msg, sizeof(msg), "主力合约查询完成，总合约数: %d，主力合约: %d，已显示: %d（按到期日排序）",
                     totalCount, instrumentCount, displayCount);
         }
         UpdateStatus(msg);
@@ -1650,13 +1756,13 @@ void TraderSpi::OnRspOrderInsert(CThostFtdcInputOrderField *pInputOrder, CThostF
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[512];
         char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-        sprintf(msg, "报单失败: ErrorID=%d, %s", pRspInfo->ErrorID, gbkErrorMsg ? gbkErrorMsg : "");
+        SafeFormat(msg, sizeof(msg), "报单失败: ErrorID=%d, %s", pRspInfo->ErrorID, gbkErrorMsg ? gbkErrorMsg : "");
         UpdateStatus(msg);
         LogMessage(msg);
         if (gbkErrorMsg) delete[] gbkErrorMsg;
     } else {
         char msg[256];
-        sprintf(msg, "报单请求已提交: %s", pInputOrder ? pInputOrder->InstrumentID : "");
+        SafeFormat(msg, sizeof(msg), "报单请求已提交: %s", pInputOrder ? pInputOrder->InstrumentID : "");
         UpdateStatus(msg);
         LogMessage(msg);
     }
@@ -1667,13 +1773,13 @@ void TraderSpi::OnRspOrderAction(CThostFtdcInputOrderActionField *pInputOrderAct
     if (pRspInfo && pRspInfo->ErrorID != 0) {
         char msg[512];
         char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-        sprintf(msg, "撤单失败: ErrorID=%d, %s", pRspInfo->ErrorID, gbkErrorMsg ? gbkErrorMsg : "");
+        SafeFormat(msg, sizeof(msg), "撤单失败: ErrorID=%d, %s", pRspInfo->ErrorID, gbkErrorMsg ? gbkErrorMsg : "");
         UpdateStatus(msg);
         LogMessage(msg);
         if (gbkErrorMsg) delete[] gbkErrorMsg;
     } else {
         char msg[256];
-        sprintf(msg, "撤单请求已提交");
+        SafeFormat(msg, sizeof(msg), "撤单请求已提交");
         UpdateStatus(msg);
         LogMessage(msg);
     }
@@ -1687,7 +1793,7 @@ void TraderSpi::OnRtnOrder(CThostFtdcOrderField *pOrder) {
     char* utf8Status = GbkToUtf8(pOrder->StatusMsg);
     
     char msg[512];
-    sprintf(msg, "报单回报: %s %s %s, 价格:%.2f, 数量:%d, 状态:%s", 
+    SafeFormat(msg, sizeof(msg), "报单回报: %s %s %s, 价格:%.2f, 数量:%d, 状态:%s", 
             pOrder->InstrumentID,
             pOrder->Direction == '0' ? "买" : "卖",
             pOrder->CombOffsetFlag[0] == '0' ? "开仓" : "平仓",
@@ -1706,7 +1812,7 @@ void TraderSpi::OnRtnTrade(CThostFtdcTradeField *pTrade) {
     if (!pTrade) return;
     
     char msg[512];
-    sprintf(msg, "成交回报: %s %s %s, 价格:%.2f, 数量:%d, 时间:%s", 
+    SafeFormat(msg, sizeof(msg), "成交回报: %s %s %s, 价格:%.2f, 数量:%d, 时间:%s", 
             pTrade->InstrumentID,
             pTrade->Direction == '0' ? "买" : "卖",
             pTrade->OffsetFlag == '0' ? "开仓" : "平仓",
@@ -1714,7 +1820,6 @@ void TraderSpi::OnRtnTrade(CThostFtdcTradeField *pTrade) {
             pTrade->Volume,
             pTrade->TradeTime);
     
-    UpdateStatus(msg);
     UpdateStatus(msg);
     LogMessage(msg);
 }
@@ -1724,7 +1829,7 @@ void TraderSpi::OnErrRtnOrderInsert(CThostFtdcInputOrderField *pInputOrder, CTho
     if (pRspInfo) {
         char msg[512];
         char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-        sprintf(msg, "报单错误: ErrorID=%d, %s", pRspInfo->ErrorID, gbkErrorMsg ? gbkErrorMsg : "");
+        SafeFormat(msg, sizeof(msg), "报单错误: ErrorID=%d, %s", pRspInfo->ErrorID, gbkErrorMsg ? gbkErrorMsg : "");
         UpdateStatus(msg);
         LogMessage(msg);
         if (gbkErrorMsg) delete[] gbkErrorMsg;
@@ -1736,7 +1841,7 @@ void TraderSpi::OnErrRtnOrderAction(CThostFtdcOrderActionField *pOrderAction, CT
     if (pRspInfo) {
         char msg[512];
         char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-        sprintf(msg, "撤单错误: ErrorID=%d, %s", pRspInfo->ErrorID, gbkErrorMsg ? gbkErrorMsg : "");
+        SafeFormat(msg, sizeof(msg), "撤单错误: ErrorID=%d, %s", pRspInfo->ErrorID, gbkErrorMsg ? gbkErrorMsg : "");
         UpdateStatus(msg);
         LogMessage(msg);
         if (gbkErrorMsg) delete[] gbkErrorMsg;
@@ -1802,7 +1907,7 @@ public:
         }
         int ret = pMdApi->SubscribeMarketData(ptrs.data(), (int)ptrs.size());
         char msg[256];
-        sprintf(msg, "订阅请求发送%s，数量=%d，ret=%d", ret == 0 ? "成功" : "失败", (int)insts.size(), ret);
+        SafeFormat(msg, sizeof(msg), "订阅请求发送%s，数量=%d，ret=%d", ret == 0 ? "成功" : "失败", (int)insts.size(), ret);
         UpdateStatus(msg);
         LogMessage(msg);
         return ret;
@@ -1842,7 +1947,7 @@ public:
         if (pRspInfo && pRspInfo->ErrorID != 0) {
             char msg[256];
             char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-            sprintf(msg, "行情登录失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+            SafeFormat(msg, sizeof(msg), "行情登录失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
             UpdateStatus(msg);
             LogMessage(msg);
             if (gbkErrorMsg) delete[] gbkErrorMsg;
@@ -1865,7 +1970,7 @@ public:
             subErr++;
             char msg[256];
             char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-            sprintf(msg, "订阅回报失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+            SafeFormat(msg, sizeof(msg), "订阅回报失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
             UpdateStatus(msg);
             LogMessage(msg);
             if (gbkErrorMsg) delete[] gbkErrorMsg;
@@ -1874,18 +1979,18 @@ public:
         subAck++;
         if (pSpecificInstrument) {
             char msg[256];
-            sprintf(msg, "订阅回报成功: %s%s", pSpecificInstrument->InstrumentID, bIsLast ? " (last)" : "");
+            SafeFormat(msg, sizeof(msg), "订阅回报成功: %s%s", pSpecificInstrument->InstrumentID, bIsLast ? " (last)" : "");
             UpdateStatus(msg);
             LogMessage(msg);
         } else {
             char msg[128];
-            sprintf(msg, "订阅回报成功: (null)%s", bIsLast ? " (last)" : "");
+            SafeFormat(msg, sizeof(msg), "订阅回报成功: (null)%s", bIsLast ? " (last)" : "");
             UpdateStatus(msg);
             LogMessage(msg);
         }
         if (bIsLast) {
             char msg[256];
-            sprintf(msg, "订阅回报汇总: 期望=%d, 成功=%d, 失败=%d", subExpected, subAck, subErr);
+            SafeFormat(msg, sizeof(msg), "订阅回报汇总: 期望=%d, 成功=%d, 失败=%d", subExpected, subAck, subErr);
             UpdateStatus(msg);
             LogMessage(msg);
         }
@@ -1899,7 +2004,7 @@ public:
             unsubErr++;
             char msg[256];
             char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-            sprintf(msg, "退订回报失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
+            SafeFormat(msg, sizeof(msg), "退订回报失败: %s", gbkErrorMsg ? gbkErrorMsg : "");
             UpdateStatus(msg);
             LogMessage(msg);
             if (gbkErrorMsg) delete[] gbkErrorMsg;
@@ -1908,18 +2013,18 @@ public:
         unsubAck++;
         if (pSpecificInstrument) {
             char msg[256];
-            sprintf(msg, "退订回报成功: %s%s", pSpecificInstrument->InstrumentID, bIsLast ? " (last)" : "");
+            SafeFormat(msg, sizeof(msg), "退订回报成功: %s%s", pSpecificInstrument->InstrumentID, bIsLast ? " (last)" : "");
             UpdateStatus(msg);
             LogMessage(msg);
         } else {
             char msg[128];
-            sprintf(msg, "退订回报成功: (null)%s", bIsLast ? " (last)" : "");
+            SafeFormat(msg, sizeof(msg), "退订回报成功: (null)%s", bIsLast ? " (last)" : "");
             UpdateStatus(msg);
             LogMessage(msg);
         }
         if (bIsLast) {
             char msg[256];
-            sprintf(msg, "退订回报汇总: 期望=%d, 成功=%d, 失败=%d", unsubExpected, unsubAck, unsubErr);
+            SafeFormat(msg, sizeof(msg), "退订回报汇总: 期望=%d, 成功=%d, 失败=%d", unsubExpected, unsubAck, unsubErr);
             UpdateStatus(msg);
             LogMessage(msg);
         }
@@ -1932,7 +2037,7 @@ public:
         if (pRspInfo && pRspInfo->ErrorID != 0) {
             char msg[256];
             char* gbkErrorMsg = Utf8ToGbk(pRspInfo->ErrorMsg);
-            sprintf(msg, "行情错误回报: %s", gbkErrorMsg ? gbkErrorMsg : "");
+            SafeFormat(msg, sizeof(msg), "行情错误回报: %s", gbkErrorMsg ? gbkErrorMsg : "");
             UpdateStatus(msg);
             LogMessage(msg);
             if (gbkErrorMsg) delete[] gbkErrorMsg;
@@ -1962,7 +2067,7 @@ public:
             char msg[256];
             char inst[64];
             CopyFixedField(inst, sizeof(inst), pDepthMarketData->InstrumentID, sizeof(pDepthMarketData->InstrumentID));
-            sprintf(msg, "收到行情推送: %s", inst);
+            SafeFormat(msg, sizeof(msg), "收到行情推送: %s", inst);
             LogMessage(msg);
             mdUpdateCount++;
         }
@@ -2080,6 +2185,7 @@ extern "C" void Disconnect(CTPTrader* trader) {
 extern "C" void SetMainWindow(CTPTrader* trader, HWND hMainWnd) {
     if (!trader) return;
     trader->hMainWnd = hMainWnd;
+    if (trader->pSpi) trader->pSpi->hMainWnd = hMainWnd;
     if (trader->pMdSpi) trader->pMdSpi->hMainWnd = hMainWnd;
 }
 
@@ -2087,6 +2193,9 @@ extern "C" void SetListView(CTPTrader* trader, HWND hListView) {
     if (trader && trader->pSpi) {
         EnterCriticalSection(&trader->pSpi->listViewLock);
         trader->pSpi->hListView = hListView;
+        if (!trader->pSpi->hMainWnd && hListView) {
+            trader->pSpi->hMainWnd = GetAncestor(hListView, GA_ROOT);
+        }
         LeaveCriticalSection(&trader->pSpi->listViewLock);
     }
 }
@@ -2112,6 +2221,17 @@ extern "C" int ConnectAndLogin(CTPTrader* trader, const char* brokerID, const ch
         return -1;
     }
     TraderSpi* pSpi = trader->pSpi;
+    pSpi->pauseReconnect = false;
+    pSpi->disconnectBurst = 0;
+    pSpi->lastDisconnectTick = 0;
+
+    {
+        const char* ver = CThostFtdcTraderApi::GetApiVersion();
+        char verMsg[128];
+        SafeFormat(verMsg, sizeof(verMsg), "Trader API Version: %s", ver ? ver : "unknown");
+        LogMessage(verMsg);
+        pSpi->UpdateStatus(verMsg);
+    }
     
     // Check if already initialized
     if (pSpi->pUserApi != NULL) {
@@ -2132,7 +2252,9 @@ extern "C" int ConnectAndLogin(CTPTrader* trader, const char* brokerID, const ch
     strncpy(pSpi->appID, appID, sizeof(pSpi->appID) - 1);
     
     char logMsg[256];
-    sprintf(logMsg, "Credentials set: BrokerID=%s, UserID=%s, Front=%s", brokerID, userID, frontAddr);
+    char maskedUser[32];
+    MaskId(userID, maskedUser, sizeof(maskedUser));
+    SafeFormat(logMsg, sizeof(logMsg), "Credentials set: BrokerID=%s, UserID=%s, Front=%s", brokerID, maskedUser, frontAddr);
     LogMessage(logMsg);
     
     try {
@@ -2304,6 +2426,14 @@ extern "C" int ConnectMarket(CTPTrader* trader, const char* mdFrontAddr) {
         trader->pMdSpi->UpdateStatus("错误: 交易对象未初始化");
         return -1;
     }
+
+    {
+        const char* ver = CThostFtdcMdApi::GetApiVersion();
+        char verMsg[128];
+        SafeFormat(verMsg, sizeof(verMsg), "MD API Version: %s", ver ? ver : "unknown");
+        LogMessage(verMsg);
+        trader->pMdSpi->UpdateStatus(verMsg);
+    }
     if (!trader->pSpi->brokerID[0] || !trader->pSpi->userID[0] || !trader->pSpi->password[0]) {
         trader->pMdSpi->UpdateStatus("错误: 请先填写并连接交易账户(用于行情登录)");
         return -1;
@@ -2315,7 +2445,9 @@ extern "C" int ConnectMarket(CTPTrader* trader, const char* mdFrontAddr) {
     strncpy(trader->pMdSpi->password, trader->pSpi->password, sizeof(trader->pMdSpi->password) - 1);
     {
         char msg[256];
-        sprintf(msg, "行情连接参数: front=%s, broker=%s, user=%s", mdFrontAddr, trader->pMdSpi->brokerID, trader->pMdSpi->userID);
+        char maskedUser[32];
+        MaskId(trader->pMdSpi->userID, maskedUser, sizeof(maskedUser));
+        SafeFormat(msg, sizeof(msg), "行情连接参数: front=%s, broker=%s, user=%s", mdFrontAddr, trader->pMdSpi->brokerID, maskedUser);
         LogMessage(msg);
     }
 
@@ -2350,9 +2482,9 @@ extern "C" int SubscribeMarketData(CTPTrader* trader, const char* instrumentsCsv
     {
         char msg[256];
         if (insts.size() == 1) {
-            sprintf(msg, "订阅合约列表: %s (共%u)", insts[0].c_str(), (unsigned)insts.size());
+            SafeFormat(msg, sizeof(msg), "订阅合约列表: %s (共%u)", insts[0].c_str(), (unsigned)insts.size());
         } else {
-            sprintf(msg, "订阅合约列表: %s, %s%s (共%u)", insts[0].c_str(), insts[1].c_str(), insts.size() > 2 ? " ..." : "", (unsigned)insts.size());
+            SafeFormat(msg, sizeof(msg), "订阅合约列表: %s, %s%s (共%u)", insts[0].c_str(), insts[1].c_str(), insts.size() > 2 ? " ..." : "", (unsigned)insts.size());
         }
         LogMessage(msg);
     }
@@ -2382,9 +2514,9 @@ extern "C" int UnsubscribeMarketData(CTPTrader* trader, const char* instrumentsC
     {
         char msg[256];
         if (insts.size() == 1) {
-            sprintf(msg, "退订合约列表: %s (共%u)", insts[0].c_str(), (unsigned)insts.size());
+            SafeFormat(msg, sizeof(msg), "退订合约列表: %s (共%u)", insts[0].c_str(), (unsigned)insts.size());
         } else {
-            sprintf(msg, "退订合约列表: %s, %s%s (共%u)", insts[0].c_str(), insts[1].c_str(), insts.size() > 2 ? " ..." : "", (unsigned)insts.size());
+            SafeFormat(msg, sizeof(msg), "退订合约列表: %s, %s%s (共%u)", insts[0].c_str(), insts[1].c_str(), insts.size() > 2 ? " ..." : "", (unsigned)insts.size());
         }
         LogMessage(msg);
     }
@@ -2412,7 +2544,7 @@ extern "C" int SendOrder(CTPTrader* trader, const char* instrumentID, char direc
     
     // 生成报单引用
     static int orderRef = 0;
-    sprintf(req.OrderRef, "%d", ++orderRef);
+    SafeFormat(req.OrderRef, sizeof(req.OrderRef), "%d", ++orderRef);
     
     req.Direction = direction;  // '0'=买, '1'=卖
     req.CombOffsetFlag[0] = offsetFlag;  // '0'=开仓, '1'=平仓, '3'=平今, '4'=平昨
@@ -2431,13 +2563,13 @@ extern "C" int SendOrder(CTPTrader* trader, const char* instrumentID, char direc
     req.UserForceClose = 0;
     
     char logMsg[512];
-    sprintf(logMsg, "SendOrder: %s, Direction=%c, Offset=%c, Price=%.2f, Volume=%d",
+    SafeFormat(logMsg, sizeof(logMsg), "SendOrder: %s, Direction=%c, Offset=%c, Price=%.2f, Volume=%d",
             instrumentID, direction, offsetFlag, price, volume);
     LogMessage(logMsg);
     
     int ret = trader->pSpi->pUserApi->ReqOrderInsert(&req, ++trader->pSpi->requestID);
     
-    sprintf(logMsg, "ReqOrderInsert returned: %d", ret);
+    SafeFormat(logMsg, sizeof(logMsg), "ReqOrderInsert returned: %d", ret);
     LogMessage(logMsg);
     
     return ret;
@@ -2465,13 +2597,13 @@ extern "C" int CancelOrder(CTPTrader* trader, const char* orderRef, const char* 
     req.ActionFlag = THOST_FTDC_AF_Delete;  // 删除
     
     char logMsg[256];
-    sprintf(logMsg, "CancelOrder: OrderRef=%s, Exchange=%s, OrderSysID=%s",
+    SafeFormat(logMsg, sizeof(logMsg), "CancelOrder: OrderRef=%s, Exchange=%s, OrderSysID=%s",
             orderRef ? orderRef : "", exchangeID ? exchangeID : "", orderSysID ? orderSysID : "");
     LogMessage(logMsg);
     
     int ret = trader->pSpi->pUserApi->ReqOrderAction(&req, ++trader->pSpi->requestID);
     
-    sprintf(logMsg, "ReqOrderAction returned: %d", ret);
+    SafeFormat(logMsg, sizeof(logMsg), "ReqOrderAction returned: %d", ret);
     LogMessage(logMsg);
     
     return ret;

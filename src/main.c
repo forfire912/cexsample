@@ -51,7 +51,7 @@ static int IsDelimW(WCHAR c) {
 #define IDC_TAB_CONTROL     1001
 #define IDC_STATUS          1002
 
-// 连接区域(测试环境)
+// 连接区域(正式环境)
 #define IDC_BTN_CONNECT     1010
 #define IDC_EDIT_BROKERID   1011
 #define IDC_EDIT_USERID     1012
@@ -60,7 +60,7 @@ static int IsDelimW(WCHAR c) {
 #define IDC_EDIT_AUTHCODE   1015
 #define IDC_EDIT_MD_FRONTADDR 1016
 
-// 正式环境连接区域(设置页)
+// 正式环境连接区域(设置页) - 已停用
 #define IDC_BTN_CONNECT_PROD     1020
 #define IDC_EDIT_BROKERID_PROD   1021
 #define IDC_EDIT_USERID_PROD     1022
@@ -69,9 +69,6 @@ static int IsDelimW(WCHAR c) {
 #define IDC_EDIT_AUTHCODE_PROD   1025
 #define IDC_EDIT_MD_FRONTADDR_PROD 1026
 
-// 查询环境选择
-#define IDC_RADIO_ENV_TEST  1090
-#define IDC_RADIO_ENV_PROD  1091
 
 // TAB 1: 查询功能
 #define IDC_QUERY_PANEL     1100
@@ -90,15 +87,12 @@ static int IsDelimW(WCHAR c) {
 // TAB 2: 订阅功能
 #define IDC_SUBSCRIBE_PANEL 1200
 #define IDC_EDIT_SUB_INSTRUMENT 1201
-#define IDC_RADIO_ENV_TEST_SUB 1202
-#define IDC_RADIO_ENV_PROD_SUB 1203
 
 // TAB 4: 系统设置
 
 #define IDC_SETTINGS_PANEL  1400
 #define IDC_EDIT_QUERY_MAX  1410
 
-#define IDT_LOGIN_POLL_TEST 2001
 #define IDT_LOGIN_POLL_PROD 2002
 #define IDT_QUERY_TIMEOUT 2003
 #define CONNECT_RETRY_DELAY_MS 10000
@@ -111,6 +105,7 @@ HINSTANCE g_hInst;
 HWND g_hMainWnd;
 HWND g_hTabControl;
 HWND g_hStatus;
+DWORD g_uiThreadId = 0;
 
 // 连接区域控件
 HWND g_hEditBrokerID;
@@ -137,7 +132,6 @@ HWND g_hSettingsPanel;
 
 HWND g_hEditQueryMax;
 BOOL g_marketSubscribeMode = FALSE;
-BOOL g_useProdEnv = FALSE;
 BOOL g_syncingInstrumentText = FALSE;
 BOOL g_queryInFlight = FALSE;
 int g_queryInFlightType = 0;
@@ -174,14 +168,11 @@ WCHAR g_importExcelPath[MAX_PATH] = {0};
 HWND g_hSettingsControls[15];  // 系统设置面板所有控件数组
 int g_nSettingsControlCount = 0;
 
-// 测试/正式 Trader 实例指针
-CTPTrader* g_pTraderTest = NULL;
+// 正式 Trader 实例指针
 CTPTrader* g_pTraderProd = NULL;
 
 // 连接节流与登录轮询时间戳
-ULONGLONG g_lastConnectAttemptTest = 0;
 ULONGLONG g_lastConnectAttemptProd = 0;
-ULONGLONG g_loginPollStartTest = 0;
 ULONGLONG g_loginPollStartProd = 0;
 
 // CTP AppID（登录认证使用）
@@ -197,13 +188,15 @@ void UpdateStatus(const char* msg);
 CTPTrader* GetActiveQueryTrader();
 const char* GetActiveQueryEnvName();
 static void GetActiveQueryMdFrontAddr(char* out, int outSize);
-static void SyncEnvRadios(BOOL useProd);
 static void SyncInstrumentTextFrom(HWND srcEdit);
 static void SetInstrumentTextBoth(const WCHAR* text);
 static BOOL BlockIfQueryInFlight(void);
 
 static BOOL ImportInstrumentsFromExcel(HWND owner);
 static BOOL ExportLatestToExcel(HWND owner);
+static void UpdateStatusOnUiThread(const char* msg);
+static int SafeStrnlenA(const char* s, int maxLen);
+static void SafeFormatA(char* buf, size_t size, const char* fmt, ...);
 
 static int ClampQueryMaxRecords(int value) {
     if (value < 1) return 1;
@@ -644,22 +637,17 @@ static void SetConnectButtonText(HWND hButton, BOOL loggedIn, BOOL isProd) {
         SetWindowText(hButton, TEXT("退出连接"));
     } else {
         // 未登录时显示“连接登录”
-        SetWindowText(hButton, isProd ? TEXT("连接登录(正式)") : TEXT("连接登录"));
+        SetWindowText(hButton, TEXT("连接登录"));
     }
 }
 
 // 启动登录状态轮询定时器
 static void StartLoginPollTimer(BOOL isProd) {
     if (!g_hMainWnd) return;
-    if (isProd) {
-        // 记录轮询起始时间并启动正式环境定时器
-        g_loginPollStartProd = GetTickCount64();
-        SetTimer(g_hMainWnd, IDT_LOGIN_POLL_PROD, LOGIN_POLL_INTERVAL_MS, NULL);
-    } else {
-        // 记录轮询起始时间并启动测试环境定时器
-        g_loginPollStartTest = GetTickCount64();
-        SetTimer(g_hMainWnd, IDT_LOGIN_POLL_TEST, LOGIN_POLL_INTERVAL_MS, NULL);
-    }
+    (void)isProd;
+    // 记录轮询起始时间并启动正式环境定时器
+    g_loginPollStartProd = GetTickCount64();
+    SetTimer(g_hMainWnd, IDT_LOGIN_POLL_PROD, LOGIN_POLL_INTERVAL_MS, NULL);
 }
 
 // 全局异常过滤器（防止崩溃无提示）
@@ -670,6 +658,7 @@ LONG WINAPI ExceptionFilter(EXCEPTION_POINTERS* pExceptionInfo) {
 
 // 程序入口：初始化 COM、控件、窗口并进入消息循环
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    g_uiThreadId = GetCurrentThreadId();
     // 初始化 COM（用于 Excel 自动化）
     HRESULT hrCo = CoInitialize(NULL);
     // 注册全局异常处理，避免无提示崩溃
@@ -736,42 +725,42 @@ void CreateMainWindow(HWND hWnd, HINSTANCE hInstance) {
     // ========== Connection Area ==========
     int y = 10;
 
-    // Row 1: 交易前置/行情前置/认证码（默认值为测试环境示例）
+    // Row 1: 交易前置/行情前置/认证码（默认值为正式环境）
     CreateWindow(TEXT("STATIC"), TEXT("交易前置:"), WS_VISIBLE | WS_CHILD,
                  10, y, 70, 24, hWnd, NULL, hInstance, NULL);
-    g_hEditFrontAddr = CreateWindow(TEXT("EDIT"), TEXT("tcp://106.37.101.162:31205"),
+    g_hEditFrontAddr = CreateWindow(TEXT("EDIT"), TEXT("tcp://106.39.36.52:55205"),
                  WS_VISIBLE | WS_CHILD | WS_BORDER,
                  80, y, 250, 24, hWnd, (HMENU)IDC_EDIT_FRONTADDR, hInstance, NULL);
 
     CreateWindow(TEXT("STATIC"), TEXT("行情前置:"), WS_VISIBLE | WS_CHILD,
                  340, y, 70, 24, hWnd, NULL, hInstance, NULL);
-    g_hEditMdFrontAddr = CreateWindow(TEXT("EDIT"), TEXT("tcp://106.37.101.162:31213"),
+    g_hEditMdFrontAddr = CreateWindow(TEXT("EDIT"), TEXT("tcp://106.39.36.52:55213"),
                  WS_VISIBLE | WS_CHILD | WS_BORDER,
                  410, y, 250, 24, hWnd, (HMENU)IDC_EDIT_MD_FRONTADDR, hInstance, NULL);
 
     CreateWindow(TEXT("STATIC"), TEXT("认证码:"), WS_VISIBLE | WS_CHILD,
                  670, y, 60, 24, hWnd, NULL, hInstance, NULL);
-    g_hEditAuthCode = CreateWindow(TEXT("EDIT"), TEXT("YHQHYHQHYHQHYHQH"),
+    g_hEditAuthCode = CreateWindow(TEXT("EDIT"), TEXT("AM8P99PA7UPUXREW"),
                  WS_VISIBLE | WS_CHILD | WS_BORDER,
                  730, y, 150, 24, hWnd, (HMENU)IDC_EDIT_AUTHCODE, hInstance, NULL);
 
-    // Row 2: 经纪商/用户/密码/连接按钮（测试环境默认值）
+    // Row 2: 经纪商/用户/密码/连接按钮（正式环境默认值）
     y += 35;
     CreateWindow(TEXT("STATIC"), TEXT("经纪商ID:"), WS_VISIBLE | WS_CHILD,
                  10, y, 80, 24, hWnd, NULL, hInstance, NULL);
-    g_hEditBrokerID = CreateWindow(TEXT("EDIT"), TEXT("1010"),
+    g_hEditBrokerID = CreateWindow(TEXT("EDIT"), TEXT("4040"),
                  WS_VISIBLE | WS_CHILD | WS_BORDER,
                  90, y, 80, 24, hWnd, (HMENU)IDC_EDIT_BROKERID, hInstance, NULL);
 
     CreateWindow(TEXT("STATIC"), TEXT("用户ID:"), WS_VISIBLE | WS_CHILD,
                  180, y, 60, 24, hWnd, NULL, hInstance, NULL);
-    g_hEditUserID = CreateWindow(TEXT("EDIT"), TEXT("20833"),
+    g_hEditUserID = CreateWindow(TEXT("EDIT"), TEXT("868599"),
                  WS_VISIBLE | WS_CHILD | WS_BORDER,
                  240, y, 80, 24, hWnd, (HMENU)IDC_EDIT_USERID, hInstance, NULL);
 
     CreateWindow(TEXT("STATIC"), TEXT("密码:"), WS_VISIBLE | WS_CHILD,
                  330, y, 40, 24, hWnd, NULL, hInstance, NULL);
-    g_hEditPassword = CreateWindow(TEXT("EDIT"), TEXT("826109"),
+    g_hEditPassword = CreateWindow(TEXT("EDIT"), TEXT("ZHYY1988"),
                  WS_VISIBLE | WS_CHILD | WS_BORDER | ES_PASSWORD,
                  370, y, 80, 24, hWnd, (HMENU)IDC_EDIT_PASSWORD, hInstance, NULL);
 
@@ -851,16 +840,7 @@ void CreateQueryPanel(HWND hParent, HINSTANCE hInstance) {
     g_hQueryControls[g_nQueryControlCount++] = CreateWindow(TEXT("BUTTON"), TEXT("查询持仓"), WS_CHILD | BS_PUSHBUTTON,
                  x+485, y-2, 90, 28, g_hQueryPanel, (HMENU)IDC_BTN_QUERY_POS, hInstance, NULL);
 
-    // 环境选择（测试/正式），影响查询使用的 Trader 实例
-    g_hQueryControls[g_nQueryControlCount++] = CreateWindow(TEXT("STATIC"), TEXT("环境:"), WS_CHILD,
-                 x+590, y+3, 50, 20, g_hQueryPanel, NULL, hInstance, NULL);
-    g_hRadioEnvTest = CreateWindow(TEXT("BUTTON"), TEXT("测试"), WS_CHILD | BS_AUTORADIOBUTTON | WS_GROUP,
-                 x+635, y-2, 60, 24, g_hQueryPanel, (HMENU)IDC_RADIO_ENV_TEST, hInstance, NULL);
-    g_hQueryControls[g_nQueryControlCount++] = g_hRadioEnvTest;
-    g_hRadioEnvProd = CreateWindow(TEXT("BUTTON"), TEXT("正式"), WS_CHILD | BS_AUTORADIOBUTTON,
-                 x+700, y-2, 60, 24, g_hQueryPanel, (HMENU)IDC_RADIO_ENV_PROD, hInstance, NULL);
-    g_hQueryControls[g_nQueryControlCount++] = g_hRadioEnvProd;
-    SyncEnvRadios(FALSE);
+    // 单环境模式：不再显示测试/正式切换
     y += 35;
     
     // 合约输入区：支持多行、逗号分隔
@@ -942,16 +922,7 @@ void CreateSubscribePanel(HWND hParent, HINSTANCE hInstance) {
     g_hSubscribeControls[g_nSubscribeControlCount++] = CreateWindow(TEXT("BUTTON"), TEXT("取消订阅"), WS_CHILD | BS_PUSHBUTTON,
                  x+185, y-2, 90, 28, g_hSubscribePanel, (HMENU)IDC_BTN_UNSUB_MD, hInstance, NULL);
 
-    // 环境选择（测试/正式）
-    g_hSubscribeControls[g_nSubscribeControlCount++] = CreateWindow(TEXT("STATIC"), TEXT("环境:"), WS_CHILD,
-                 x+590, y+3, 50, 20, g_hSubscribePanel, NULL, hInstance, NULL);
-    g_hRadioEnvTestSub = CreateWindow(TEXT("BUTTON"), TEXT("测试"), WS_CHILD | BS_AUTORADIOBUTTON | WS_GROUP,
-                 x+635, y-2, 60, 24, g_hSubscribePanel, (HMENU)IDC_RADIO_ENV_TEST_SUB, hInstance, NULL);
-    g_hSubscribeControls[g_nSubscribeControlCount++] = g_hRadioEnvTestSub;
-    g_hRadioEnvProdSub = CreateWindow(TEXT("BUTTON"), TEXT("正式"), WS_CHILD | BS_AUTORADIOBUTTON,
-                 x+700, y-2, 60, 24, g_hSubscribePanel, (HMENU)IDC_RADIO_ENV_PROD_SUB, hInstance, NULL);
-    g_hSubscribeControls[g_nSubscribeControlCount++] = g_hRadioEnvProdSub;
-    SyncEnvRadios(g_useProdEnv);
+    // 单环境模式：不再显示测试/正式切换
 
     y += 35;
 
@@ -993,55 +964,6 @@ void CreateSettingsPanel(HWND hParent, HINSTANCE hInstance) {
     SetWindowLongPtr(g_hSettingsPanel, GWLP_WNDPROC, (LONG_PTR)PanelProc);
     
     int x = 30, y = 15;
-
-    // 正式环境连接区：用于单独配置正式账号
-    CreateWindow(TEXT("STATIC"), TEXT("【 正式环境查询连接 】"),
-                 WS_VISIBLE | WS_CHILD,
-                 x, y, 220, 25, g_hSettingsPanel, NULL, hInstance, NULL);
-    y += 30;
-
-    CreateWindow(TEXT("STATIC"), TEXT("交易前置:"), WS_VISIBLE | WS_CHILD,
-                 x, y, 70, 22, g_hSettingsPanel, NULL, hInstance, NULL);
-    g_hEditFrontAddrProd = CreateWindow(TEXT("EDIT"), TEXT("tcp://58.247.171.151:31205"),
-                 WS_VISIBLE | WS_CHILD | WS_BORDER,
-                 x+75, y-2, 240, 24, g_hSettingsPanel, (HMENU)IDC_EDIT_FRONTADDR_PROD, hInstance, NULL);
-
-    CreateWindow(TEXT("STATIC"), TEXT("行情前置:"), WS_VISIBLE | WS_CHILD,
-                 x+325, y, 70, 22, g_hSettingsPanel, NULL, hInstance, NULL);
-    g_hEditMdFrontAddrProd = CreateWindow(TEXT("EDIT"), TEXT("tcp://58.247.171.151:31213"),
-                 WS_VISIBLE | WS_CHILD | WS_BORDER,
-                 x+395, y-2, 240, 24, g_hSettingsPanel, (HMENU)IDC_EDIT_MD_FRONTADDR_PROD, hInstance, NULL);
-
-    CreateWindow(TEXT("STATIC"), TEXT("认证码:"), WS_VISIBLE | WS_CHILD,
-                 x+645, y, 55, 22, g_hSettingsPanel, NULL, hInstance, NULL);
-    g_hEditAuthCodeProd = CreateWindow(TEXT("EDIT"), TEXT("AM8P99PA7UPUXREW"),
-                 WS_VISIBLE | WS_CHILD | WS_BORDER,
-                 x+700, y-2, 150, 24, g_hSettingsPanel, (HMENU)IDC_EDIT_AUTHCODE_PROD, hInstance, NULL);
-
-    y += 30;
-    CreateWindow(TEXT("STATIC"), TEXT("经纪商ID:"), WS_VISIBLE | WS_CHILD,
-                 x, y, 70, 22, g_hSettingsPanel, NULL, hInstance, NULL);
-    g_hEditBrokerIDProd = CreateWindow(TEXT("EDIT"), TEXT("4040"),
-                 WS_VISIBLE | WS_CHILD | WS_BORDER,
-                 x+75, y-2, 80, 24, g_hSettingsPanel, (HMENU)IDC_EDIT_BROKERID_PROD, hInstance, NULL);
-
-    CreateWindow(TEXT("STATIC"), TEXT("用户ID:"), WS_VISIBLE | WS_CHILD,
-                 x+165, y, 55, 22, g_hSettingsPanel, NULL, hInstance, NULL);
-    g_hEditUserIDProd = CreateWindow(TEXT("EDIT"), TEXT("0022868599"),
-                 WS_VISIBLE | WS_CHILD | WS_BORDER,
-                 x+220, y-2, 100, 24, g_hSettingsPanel, (HMENU)IDC_EDIT_USERID_PROD, hInstance, NULL);
-
-    CreateWindow(TEXT("STATIC"), TEXT("密码:"), WS_VISIBLE | WS_CHILD,
-                 x+330, y, 40, 22, g_hSettingsPanel, NULL, hInstance, NULL);
-    g_hEditPasswordProd = CreateWindow(TEXT("EDIT"), TEXT("XXXX"),
-                 WS_VISIBLE | WS_CHILD | WS_BORDER | ES_PASSWORD,
-                 x+370, y-2, 120, 24, g_hSettingsPanel, (HMENU)IDC_EDIT_PASSWORD_PROD, hInstance, NULL);
-
-    CreateWindow(TEXT("BUTTON"), TEXT("连接登录(正式)"),
-                 WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                 x+505, y-2, 140, 26, g_hSettingsPanel, (HMENU)IDC_BTN_CONNECT_PROD, hInstance, NULL);
-
-    y += 45;
 
     // 查询设置
     CreateWindow(TEXT("STATIC"), TEXT("【 查询设置 】"),
@@ -1109,14 +1031,6 @@ void SwitchTab(int tabIndex) {
     InvalidateRect(g_hMainWnd, NULL, TRUE);
 }
 
-static void SyncEnvRadios(BOOL useProd) {
-    g_useProdEnv = useProd ? TRUE : FALSE;
-    if (g_hRadioEnvTest) SendMessage(g_hRadioEnvTest, BM_SETCHECK, g_useProdEnv ? BST_UNCHECKED : BST_CHECKED, 0);
-    if (g_hRadioEnvProd) SendMessage(g_hRadioEnvProd, BM_SETCHECK, g_useProdEnv ? BST_CHECKED : BST_UNCHECKED, 0);
-    if (g_hRadioEnvTestSub) SendMessage(g_hRadioEnvTestSub, BM_SETCHECK, g_useProdEnv ? BST_UNCHECKED : BST_CHECKED, 0);
-    if (g_hRadioEnvProdSub) SendMessage(g_hRadioEnvProdSub, BM_SETCHECK, g_useProdEnv ? BST_CHECKED : BST_UNCHECKED, 0);
-}
-
 static void SyncInstrumentTextFrom(HWND srcEdit) {
     if (g_syncingInstrumentText || !srcEdit) return;
     HWND dstEdit = (srcEdit == g_hEditQueryInstrument) ? g_hEditSubscribeInstrument : g_hEditQueryInstrument;
@@ -1153,35 +1067,22 @@ static BOOL BlockIfQueryInFlight(void) {
     return FALSE;
 }
 
-// 根据查询环境单选按钮获取当前 Trader 实例（测试/正式）
+// 获取当前 Trader 实例（仅正式环境）
 CTPTrader* GetActiveQueryTrader() {
-    if (g_useProdEnv) {
-        // 正式环境被选中时使用正式 Trader
-        return g_pTraderProd;
-    }
-    return g_pTraderTest;
+    return g_pTraderProd;
 }
 
 // 获取当前查询环境的显示名称（用于状态提示）
 const char* GetActiveQueryEnvName() {
-    if (g_useProdEnv) {
-        return "正式";
-    }
-    return "测试";
+    return "正式";
 }
 
 static void GetActiveQueryMdFrontAddr(char* out, int outSize) {
     if (!out || outSize <= 0) return;
     out[0] = 0;
     WCHAR wAddr[128] = {0};
-    if (g_useProdEnv) {
-        if (g_hEditMdFrontAddrProd) {
-            GetWindowText(g_hEditMdFrontAddrProd, wAddr, _countof(wAddr));
-        }
-    } else {
-        if (g_hEditMdFrontAddr) {
-            GetWindowText(g_hEditMdFrontAddr, wAddr, _countof(wAddr));
-        }
+    if (g_hEditMdFrontAddr) {
+        GetWindowText(g_hEditMdFrontAddr, wAddr, _countof(wAddr));
     }
     WideCharToMultiByte(CP_ACP, 0, wAddr, -1, out, outSize, NULL, NULL);
 }
@@ -1192,16 +1093,11 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         case WM_CREATE:
             // 创建主窗口 UI，并初始化交易对象
             CreateMainWindow(hWnd, g_hInst);
-            // 分别创建测试/正式 Trader，并挂接回调
-            g_pTraderTest = CreateCTPTrader();
+            // 仅创建正式 Trader，并挂接回调
             g_pTraderProd = CreateCTPTrader();
-            if (g_pTraderTest) {
-                SetMainWindow(g_pTraderTest, g_hMainWnd);
-                SetListView(g_pTraderTest, g_hListViewQuery);  // 默认使用查询面板的ListView
-                SetStatusCallback(g_pTraderTest, UpdateStatus);
-            }
             if (g_pTraderProd) {
                 SetMainWindow(g_pTraderProd, g_hMainWnd);
+                SetListView(g_pTraderProd, g_hListViewQuery);
                 SetStatusCallback(g_pTraderProd, UpdateStatus);
             }
             return 0;
@@ -1299,7 +1195,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                             WideCharToMultiByte(CP_ACP, 0, instrumentID, -1, ansiInstrumentID, sizeof(ansiInstrumentID), NULL, NULL);
                             
                             char statusMsg[128];
-                            sprintf(statusMsg, "已选择合约: %s", ansiInstrumentID);
+                            SafeFormatA(statusMsg, sizeof(statusMsg), "已选择合约: %s", ansiInstrumentID);
                             UpdateStatus(statusMsg);
                         }
                     }
@@ -1311,39 +1207,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         case WM_COMMAND:
             // 按钮/菜单命令统一在此处理
             switch (LOWORD(wParam)) {
-                case IDC_RADIO_ENV_TEST:
-                case IDC_RADIO_ENV_PROD:
-                case IDC_RADIO_ENV_TEST_SUB:
-                case IDC_RADIO_ENV_PROD_SUB: {
-                    // 切换环境时同步更新默认连接参数
-                    if (HIWORD(wParam) == BN_CLICKED) {
-                        BOOL useProd = (LOWORD(wParam) == IDC_RADIO_ENV_PROD || LOWORD(wParam) == IDC_RADIO_ENV_PROD_SUB);
-                        SyncEnvRadios(useProd);
-                        if (useProd) {
-                            if (g_hEditFrontAddrProd) SetWindowText(g_hEditFrontAddrProd, TEXT("tcp://58.247.171.151:31205"));
-                            if (g_hEditMdFrontAddrProd) SetWindowText(g_hEditMdFrontAddrProd, TEXT("tcp://58.247.171.151:31213"));
-                            if (g_hEditAuthCodeProd) SetWindowText(g_hEditAuthCodeProd, TEXT("AM8P99PA7UPUXREW"));
-                            if (g_hEditBrokerIDProd) SetWindowText(g_hEditBrokerIDProd, TEXT("4040"));
-                            if (g_hEditUserIDProd) SetWindowText(g_hEditUserIDProd, TEXT("0022868599"));
-                            if (g_hEditPasswordProd) SetWindowText(g_hEditPasswordProd, TEXT("XXXX"));
-                            if (g_hEditFrontAddr) SetWindowText(g_hEditFrontAddr, TEXT("tcp://58.247.171.151:31205"));
-                            if (g_hEditMdFrontAddr) SetWindowText(g_hEditMdFrontAddr, TEXT("tcp://58.247.171.151:31213"));
-                            if (g_hEditAuthCode) SetWindowText(g_hEditAuthCode, TEXT("AM8P99PA7UPUXREW"));
-                            if (g_hEditBrokerID) SetWindowText(g_hEditBrokerID, TEXT("4040"));
-                            if (g_hEditUserID) SetWindowText(g_hEditUserID, TEXT("0022868599"));
-                            if (g_hEditPassword) SetWindowText(g_hEditPassword, TEXT("XXXX"));
-                        } else {
-                            if (g_hEditFrontAddr) SetWindowText(g_hEditFrontAddr, TEXT("tcp://106.37.101.162:31205"));
-                            if (g_hEditMdFrontAddr) SetWindowText(g_hEditMdFrontAddr, TEXT("tcp://106.37.101.162:31213"));
-                            if (g_hEditAuthCode) SetWindowText(g_hEditAuthCode, TEXT("YHQHYHQHYHQHYHQH"));
-                            if (g_hEditBrokerID) SetWindowText(g_hEditBrokerID, TEXT("1010"));
-                            if (g_hEditUserID) SetWindowText(g_hEditUserID, TEXT("20833"));
-                            if (g_hEditPassword) SetWindowText(g_hEditPassword, TEXT("826109"));
-                        }
-                    }
-                    break;
-                }
-
                 case IDC_EDIT_QUERY_MAX: {
                     if (HIWORD(wParam) == EN_KILLFOCUS) {
                         ApplyQueryMaxRecordsFromEdit(g_hEditQueryMax);
@@ -1360,20 +1223,20 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 }
 
                 case IDC_BTN_CONNECT: {
-                    // 测试环境连接/断开
-                    CTPTrader* trader = g_pTraderTest;
+                    // 正式环境连接/断开
+                    CTPTrader* trader = g_pTraderProd;
                     if (trader && IsLoggedIn(trader)) {
                         Disconnect(trader);
                         // 状态变更时同步更新连接按钮文字
                         // 根据当前登录状态刷新按钮文案
 // 根据当前登录状态刷新按钮文案
-                        SetConnectButtonText(g_hBtnConnect, FALSE, FALSE);
+                        SetConnectButtonText(g_hBtnConnect, FALSE, TRUE);
                         break;
                     }
 
                     // 简单的连接节流，避免频繁重连
                     ULONGLONG now = GetTickCount64();
-                    if (g_lastConnectAttemptTest && (now - g_lastConnectAttemptTest) < CONNECT_RETRY_DELAY_MS) {
+                    if (g_lastConnectAttemptProd && (now - g_lastConnectAttemptProd) < CONNECT_RETRY_DELAY_MS) {
                         UpdateStatus("未连接，请10秒后重试");
                         break;
                     }
@@ -1396,51 +1259,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     WideCharToMultiByte(CP_ACP, 0, wAuthCode, -1, authCode, sizeof(authCode), NULL, NULL);
 
                     // 发起连接并启动登录轮询
-                    UpdateStatus("正在连接(测试)...");
-                    if (trader) {
-                        Disconnect(trader);
-                        ConnectAndLogin(trader, brokerID, userID, password, frontAddr, authCode, APP_ID);
-                        g_lastConnectAttemptTest = now;
-                        StartLoginPollTimer(FALSE);
-                    } else {
-                        UpdateStatus("错误: 测试环境对象未初始化");
-                    }
-                    break;
-                }
-                
-                case IDC_BTN_CONNECT_PROD: {
-                    // 正式环境连接/断开
-                    CTPTrader* trader = g_pTraderProd;
-                    if (trader && IsLoggedIn(trader)) {
-                        Disconnect(trader);
-                        SetConnectButtonText(g_hBtnConnectProd, FALSE, TRUE);
-                        break;
-                    }
-
-                    // 简单的连接节流，避免频繁重连
-                    ULONGLONG now = GetTickCount64();
-                    if (g_lastConnectAttemptProd && (now - g_lastConnectAttemptProd) < CONNECT_RETRY_DELAY_MS) {
-                        UpdateStatus("未连接，请10秒后重试");
-                        break;
-                    }
-
-                    char brokerID[32], userID[32], password[32], frontAddr[128], authCode[64];
-                    WCHAR wBrokerID[32], wUserID[32], wPassword[32], wFrontAddr[128], wAuthCode[64];
-
-                    // 从界面读取参数并做宽窄字符转换
-                    GetWindowText(g_hEditBrokerIDProd, wBrokerID, 32);
-                    GetWindowText(g_hEditUserIDProd, wUserID, 32);
-                    GetWindowText(g_hEditPasswordProd, wPassword, 32);
-                    GetWindowText(g_hEditFrontAddrProd, wFrontAddr, 128);
-                    GetWindowText(g_hEditAuthCodeProd, wAuthCode, 64);
-
-                    WideCharToMultiByte(CP_ACP, 0, wBrokerID, -1, brokerID, sizeof(brokerID), NULL, NULL);
-                    WideCharToMultiByte(CP_ACP, 0, wUserID, -1, userID, sizeof(userID), NULL, NULL);
-                    WideCharToMultiByte(CP_ACP, 0, wPassword, -1, password, sizeof(password), NULL, NULL);
-                    WideCharToMultiByte(CP_ACP, 0, wFrontAddr, -1, frontAddr, sizeof(frontAddr), NULL, NULL);
-                    WideCharToMultiByte(CP_ACP, 0, wAuthCode, -1, authCode, sizeof(authCode), NULL, NULL);
-
-                    // 发起连接并启动登录轮询
                     UpdateStatus("正在连接(正式)...");
                     if (trader) {
                         Disconnect(trader);
@@ -1452,7 +1270,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     }
                     break;
                 }
-
+                
                 case IDC_BTN_QUERY_ORDER: {
                     // 查询委托：要求已登录
                     if (BlockIfQueryInFlight()) break;
@@ -1466,7 +1284,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         QueryOrders(trader);
                     } else {
                         char msg[128];
-                        sprintf(msg, "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
+                        SafeFormatA(msg, sizeof(msg), "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
                         UpdateStatus(msg);
                     }
                     break;
@@ -1484,7 +1302,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         QueryPositions(trader);
                     } else {
                         char msg[128];
-                        sprintf(msg, "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
+                        SafeFormatA(msg, sizeof(msg), "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
                         UpdateStatus(msg);
                     }
                     break;
@@ -1545,7 +1363,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         if (instrumentBuf) free(instrumentBuf);
                     } else {
                         char msg[128];
-                        sprintf(msg, "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
+                        SafeFormatA(msg, sizeof(msg), "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
                         UpdateStatus(msg);
                     }
                     break;
@@ -1624,7 +1442,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         free(instrumentBuf);
                     } else {
                         char msg[128];
-                        sprintf(msg, "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
+                        SafeFormatA(msg, sizeof(msg), "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
                         UpdateStatus(msg);
                     }
                     break;
@@ -1672,7 +1490,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         free(instrumentBuf);
                     } else {
                         char msg[128];
-                        sprintf(msg, "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
+                        SafeFormatA(msg, sizeof(msg), "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
                         UpdateStatus(msg);
                     }
                     break;
@@ -1701,7 +1519,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         QueryOptions(trader);
                     } else {
                         char msg[128];
-                        sprintf(msg, "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
+                        SafeFormatA(msg, sizeof(msg), "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
                         UpdateStatus(msg);
                     }
                     break;
@@ -1719,7 +1537,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         QueryInstrument(trader, "");
                     } else {
                         char msg[128];
-                        sprintf(msg, "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
+                        SafeFormatA(msg, sizeof(msg), "错误: 请先连接登录(%s)", GetActiveQueryEnvName());
                         UpdateStatus(msg);
                     }
                     break;
@@ -1728,6 +1546,92 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
 
             return 0;
+        case WM_APP_STATUS_UPDATE: {
+            char* msg = (char*)lParam;
+            if (msg) {
+                UpdateStatusOnUiThread(msg);
+                free(msg);
+            }
+            return 0;
+        }
+        case WM_APP_LISTVIEW_OP: {
+            ListViewOp* op = (ListViewOp*)lParam;
+            if (!op) return 0;
+            if (!op->hListView || !IsWindow(op->hListView)) {
+                // 尝试恢复 ListView 句柄
+                HWND recovered = g_hListViewQuery;
+                if (!recovered && g_hMainWnd) {
+                    recovered = GetDlgItem(g_hMainWnd, IDC_LISTVIEW_QUERY);
+                }
+                if (recovered && IsWindow(recovered)) {
+                    op->hListView = recovered;
+                } else {
+                    if (op->wtext) free(op->wtext);
+                    if (op->text) free(op->text);
+                    free(op);
+                    return 0;
+                }
+            }
+            switch (op->op) {
+                case LV_OP_CLEAR: {
+                    ListView_DeleteAllItems(op->hListView);
+                    while (ListView_DeleteColumn(op->hListView, 0));
+                    break;
+                }
+                case LV_OP_ADD_COLUMN: {
+                    if (op->wtext) {
+                        LVCOLUMNW c = {0};
+                        c.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT;
+                        c.fmt = LVCFMT_LEFT;
+                        c.cx = op->width;
+                        c.pszText = op->wtext;
+                        LRESULT colIndex = SendMessage(op->hListView, LVM_INSERTCOLUMNW, op->col, (LPARAM)&c);
+                        if (colIndex == -1) {
+                            LogMessage("ListView AddColumn failed in UI thread");
+                        }
+                    }
+                    break;
+                }
+                case LV_OP_ADD_ITEM: {
+                    const char* safeText = op->text ? op->text : "";
+                    WCHAR wtext[256];
+                    int inLen = SafeStrnlenA(safeText, 240);
+                    int wlen = MultiByteToWideChar(CP_UTF8, 0, safeText, inLen, wtext, 255);
+                    if (wlen == 0) {
+                        wlen = MultiByteToWideChar(CP_ACP, 0, safeText, inLen, wtext, 255);
+                    }
+                    if (wlen < 0) wlen = 0;
+                    wtext[wlen] = L'\0';
+                    if (op->col == 0) {
+                        LVITEMW it = {0};
+                        it.mask = LVIF_TEXT;
+                        it.iItem = op->row;
+                        it.iSubItem = 0;
+                        it.pszText = wtext;
+                        LRESULT rowIndex = SendMessage(op->hListView, LVM_INSERTITEMW, 0, (LPARAM)&it);
+                        if (rowIndex == -1) {
+                            LogMessage("ListView InsertItem failed in UI thread");
+                        }
+                    } else {
+                        LVITEMW it2 = {0};
+                        it2.iItem = op->row;
+                        it2.iSubItem = op->col;
+                        it2.pszText = wtext;
+                        LRESULT ok = SendMessage(op->hListView, LVM_SETITEMTEXTW, op->row, (LPARAM)&it2);
+                        if (!ok) {
+                            LogMessage("ListView SetItemText failed in UI thread");
+                        }
+                    }
+                    break;
+                }
+                default:
+                    break;
+            }
+            if (op->wtext) free(op->wtext);
+            if (op->text) free(op->text);
+            free(op);
+            return 0;
+        }
         case WM_APP_MD_UPDATE: {
             // 行情更新消息：刷新/新增 ListView 行
             MdUpdate* u = (MdUpdate*)lParam;
@@ -1817,18 +1721,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
         case WM_TIMER:
             // 定时器：登录轮询 + 行情超时提示
-            if (wParam == IDT_LOGIN_POLL_TEST) {
-                if (g_pTraderTest && IsLoggedIn(g_pTraderTest)) {
-                    SetConnectButtonText(g_hBtnConnect, TRUE, FALSE);
-                    KillTimer(g_hMainWnd, IDT_LOGIN_POLL_TEST);
-                } else if (g_loginPollStartTest && (GetTickCount64() - g_loginPollStartTest) > LOGIN_POLL_TIMEOUT_MS) {
-                    KillTimer(g_hMainWnd, IDT_LOGIN_POLL_TEST);
-                }
-                return 0;
-            }
             if (wParam == IDT_LOGIN_POLL_PROD) {
                 if (g_pTraderProd && IsLoggedIn(g_pTraderProd)) {
-                    SetConnectButtonText(g_hBtnConnectProd, TRUE, TRUE);
+                    SetConnectButtonText(g_hBtnConnect, TRUE, TRUE);
                     KillTimer(g_hMainWnd, IDT_LOGIN_POLL_PROD);
                 } else if (g_loginPollStartProd && (GetTickCount64() - g_loginPollStartProd) > LOGIN_POLL_TIMEOUT_MS) {
                     KillTimer(g_hMainWnd, IDT_LOGIN_POLL_PROD);
@@ -1884,11 +1779,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             return 0;
         case WM_DESTROY:
             // 退出前清理 Trader 对象
-            if (g_pTraderTest) {
-                // 释放测试环境 Trader 资源
-                DestroyCTPTrader(g_pTraderTest);
-                g_pTraderTest = NULL;
-            }
             if (g_pTraderProd) {
                 DestroyCTPTrader(g_pTraderProd);
                 g_pTraderProd = NULL;
@@ -1907,9 +1797,23 @@ static BOOL IsUtf8String(const char* s) {
     return wlen > 0;
 }
 
-// 更新状态栏文本并同步连接按钮状态
-// 将状态字符串转换为宽字符并更新状态栏，同时刷新连接按钮文案
-void UpdateStatus(const char* msg) {
+static int SafeStrnlenA(const char* s, int maxLen) {
+    if (!s || maxLen <= 0) return 0;
+    for (int i = 0; i < maxLen; ++i) {
+        if (s[i] == '\0') return i;
+    }
+    return maxLen;
+}
+
+static void SafeFormatA(char* buf, size_t size, const char* fmt, ...) {
+    if (!buf || size == 0) return;
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf_s(buf, size, _TRUNCATE, fmt, ap);
+    va_end(ap);
+}
+
+static void UpdateStatusOnUiThread(const char* msg) {
     if (g_hStatus && msg) {
         WCHAR wMsg[512];
         // 支持 UTF-8 或 ACP 编码的消息
@@ -1924,10 +1828,24 @@ void UpdateStatus(const char* msg) {
         // 写入状态栏控件文本
         SetWindowText(g_hStatus, wMsg);
         if (g_hBtnConnect) {
-            SetConnectButtonText(g_hBtnConnect, (g_pTraderTest && IsLoggedIn(g_pTraderTest)) ? TRUE : FALSE, FALSE);
-        }
-        if (g_hBtnConnectProd) {
-            SetConnectButtonText(g_hBtnConnectProd, (g_pTraderProd && IsLoggedIn(g_pTraderProd)) ? TRUE : FALSE, TRUE);
+            SetConnectButtonText(g_hBtnConnect, (g_pTraderProd && IsLoggedIn(g_pTraderProd)) ? TRUE : FALSE, TRUE);
         }
     }
+}
+
+// 更新状态栏文本并同步连接按钮状态
+// 将状态字符串转换为宽字符并更新状态栏，同时刷新连接按钮文案
+void UpdateStatus(const char* msg) {
+    if (!msg) return;
+    if (g_uiThreadId != 0 && GetCurrentThreadId() != g_uiThreadId && g_hMainWnd) {
+        size_t len = strlen(msg) + 1;
+        char* copy = (char*)malloc(len);
+        if (!copy) return;
+        memcpy(copy, msg, len);
+        if (!PostMessage(g_hMainWnd, WM_APP_STATUS_UPDATE, 0, (LPARAM)copy)) {
+            free(copy);
+        }
+        return;
+    }
+    UpdateStatusOnUiThread(msg);
 }
