@@ -24,7 +24,7 @@
 #define IDC_LISTVIEW_QUERY 1106
 #endif
 
-static int g_queryMaxRecords = 100;
+static int g_queryMaxRecords = 200;
 static int g_listViewLogCount = 0;
 
 static void SafeFormat(char* buf, size_t size, const char* fmt, ...) {
@@ -154,6 +154,11 @@ static int SafeStrnlen(const char* s, int maxLen) {
     return maxLen;
 }
 
+// 前置声明（用于 CSV 流式导出）
+static std::wstring Utf8ToWide(const char* s);
+static void EnsureDir(const char* path);
+static void GetNowYYYYMMDDHHMMSS(char* buf, size_t len);
+
 // 安全拷贝：固定长度字段 -> C 字符串
 static void CopyFixedField(char* dst, size_t dstSize, const char* src, size_t srcSize) {
     if (!dst || dstSize == 0) return;
@@ -188,6 +193,101 @@ static std::string CsvEscape(const std::string& s) {
         return std::string("\"") + out + "\"";
     }
     return out;
+}
+
+// 追加写入 CSV 表头/行（UTF-8）
+static void WriteCsvHeader(FILE* f, const std::vector<std::string>& headers) {
+    if (!f || headers.empty()) return;
+    std::string line;
+    for (size_t i = 0; i < headers.size(); ++i) {
+        if (i) line.append(",");
+        line.append(CsvEscape(headers[i]));
+    }
+    line.append("\n");
+    fwrite(line.data(), 1, line.size(), f);
+}
+
+static void WriteCsvRow(FILE* f, const std::vector<std::string>& row) {
+    if (!f) return;
+    std::string line;
+    for (size_t i = 0; i < row.size(); ++i) {
+        if (i) line.append(",");
+        line.append(CsvEscape(row[i]));
+    }
+    line.append("\n");
+    fwrite(line.data(), 1, line.size(), f);
+}
+
+static FILE* OpenCsvStreamUtf8(const char* userID, const char* contentName, char* outPath, size_t outSize) {
+    if (!userID || !contentName || !outPath || outSize == 0) return NULL;
+    EnsureDir("export");
+    char datetimeStr[15];
+    GetNowYYYYMMDDHHMMSS(datetimeStr, sizeof(datetimeStr));
+    SafeFormat(outPath, outSize, "export\\%s_%s_%s.csv", userID, contentName, datetimeStr);
+    std::wstring wpath = Utf8ToWide(outPath);
+    FILE* f = _wfopen(wpath.c_str(), L"wb");
+    if (!f) return NULL;
+    const unsigned char bom[3] = {0xEF, 0xBB, 0xBF};
+    fwrite(bom, 1, 3, f);
+    return f;
+}
+
+static void WriteInstrumentRow(FILE* f, const CThostFtdcInstrumentField* p, const char* nameUtf8) {
+    if (!f || !p) return;
+    std::vector<std::string> row;
+    char buf[128];
+    row.push_back(p->InstrumentID);
+    row.push_back(nameUtf8 ? nameUtf8 : "");
+    row.push_back(p->ExchangeID);
+    row.push_back(p->ExchangeInstID);
+    row.push_back(p->ProductID);
+    FormatChar(buf, p->ProductClass);
+    row.push_back(buf);
+    SafeFormat(buf, sizeof(buf), "%d", p->DeliveryYear);
+    row.push_back(buf);
+    SafeFormat(buf, sizeof(buf), "%d", p->DeliveryMonth);
+    row.push_back(buf);
+    SafeFormat(buf, sizeof(buf), "%d", p->MaxMarketOrderVolume);
+    row.push_back(buf);
+    SafeFormat(buf, sizeof(buf), "%d", p->MinMarketOrderVolume);
+    row.push_back(buf);
+    SafeFormat(buf, sizeof(buf), "%d", p->MaxLimitOrderVolume);
+    row.push_back(buf);
+    SafeFormat(buf, sizeof(buf), "%d", p->MinLimitOrderVolume);
+    row.push_back(buf);
+    SafeFormat(buf, sizeof(buf), "%d", p->VolumeMultiple);
+    row.push_back(buf);
+    SafeFormat(buf, sizeof(buf), "%.4f", p->PriceTick);
+    row.push_back(buf);
+    row.push_back(p->CreateDate);
+    row.push_back(p->OpenDate);
+    row.push_back(p->ExpireDate);
+    row.push_back(p->StartDelivDate);
+    row.push_back(p->EndDelivDate);
+    FormatChar(buf, p->InstLifePhase);
+    row.push_back(buf);
+    FormatChar(buf, p->IsTrading);
+    row.push_back(buf);
+    FormatChar(buf, p->PositionType);
+    row.push_back(buf);
+    FormatChar(buf, p->PositionDateType);
+    row.push_back(buf);
+    FormatDouble(buf, p->LongMarginRatio, 6);
+    row.push_back(buf);
+    FormatDouble(buf, p->ShortMarginRatio, 6);
+    row.push_back(buf);
+    FormatChar(buf, p->MaxMarginSideAlgorithm);
+    row.push_back(buf);
+    FormatDouble(buf, p->StrikePrice, 2);
+    row.push_back(buf);
+    FormatChar(buf, p->OptionsType);
+    row.push_back(buf);
+    FormatDouble(buf, p->UnderlyingMultiple, 2);
+    row.push_back(buf);
+    FormatChar(buf, p->CombinationType);
+    row.push_back(buf);
+    row.push_back(p->UnderlyingInstrID);
+    WriteCsvRow(f, row);
 }
 
 // 获取当前日期（YYYYMMDD）
@@ -385,6 +485,9 @@ public:
     std::map<std::string, int> marketStatus; // 0=pending 1=sent 2=ok 3=failed
     std::string currentReqInst;
     ULONGLONG currentReqSendTick;
+    FILE* marketStreamFile;
+    FILE* instrumentStreamFile;
+    int instrumentStreamRows;
     
     // 初始化 SPI 状态与同步对象
     TraderSpi() {
@@ -423,6 +526,9 @@ public:
         marketStatus.clear();
         currentReqInst.clear();
         currentReqSendTick = 0;
+        marketStreamFile = NULL;
+        instrumentStreamFile = NULL;
+        instrumentStreamRows = 0;
         marketStatus.clear();
         currentReqInst.clear();
         currentReqSendTick = 0;
@@ -480,6 +586,10 @@ public:
     }
 
     void ClearMarketQueryQueue() {
+        if (marketStreamFile) {
+            fclose(marketStreamFile);
+            marketStreamFile = NULL;
+        }
         marketQueryQueue.clear();
         marketQueryIndex = 0;
         marketBatchActive = false;
@@ -504,14 +614,36 @@ public:
 
     bool HasPendingMarketQuery() const {
         if (!marketBatchActive) return false;
-        for (std::map<std::string,int>::const_iterator it = marketStatus.begin(); it != marketStatus.end(); ++it) {
-            if (it->second == 0 || it->second == 1) return true;
+        // Prefer queue as source of truth; status map can be out of sync on retries.
+        for (size_t i = 0; i < marketQueryQueue.size(); ++i) {
+            const std::string& cand = marketQueryQueue[i];
+            std::map<std::string,int>::const_iterator it = marketStatus.find(cand);
+            int st = (it == marketStatus.end()) ? 0 : it->second;
+            if (st == 0 || st == 1) return true;
         }
         return false;
     }
 
     bool IsMarketQueryActive() const {
         return marketBatchActive;
+    }
+
+    void TrimListViewToMax(int maxRows) {
+        if (!hListView && hMainWnd) {
+            hListView = GetDlgItem(hMainWnd, IDC_LISTVIEW_QUERY);
+        }
+        HWND target = hListView;
+        if (!hMainWnd && target) {
+            hMainWnd = GetAncestor(target, GA_ROOT);
+        }
+        HWND host = hMainWnd;
+        if (!target || !host) return;
+        ListViewOp* op = AllocListViewOp(LV_OP_TRIM_TO_MAX, target);
+        if (!op) return;
+        op->row = maxRows;
+        if (!PostMessage(host, WM_APP_LISTVIEW_OP, 0, (LPARAM)op)) {
+            free(op);
+        }
     }
 
     int SendNextMarketQuery() {
@@ -672,7 +804,14 @@ public:
             UpdateStatus(msg);
             LogMessage(msg);
         }
-        ExportMarketIfReady();
+        if (!marketStreamFile) {
+            ExportMarketIfReady();
+        } else {
+            fclose(marketStreamFile);
+            marketStreamFile = NULL;
+        }
+        // 仅保留配置条数显示（默认 200）
+        TrimListViewToMax(GetQueryMaxRecords());
         ClearMarketQueryQueue();
         EndQuery(3);
     }
@@ -1191,6 +1330,16 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
         }
         return;
     }
+    // 若批量已结束且状态已清空，忽略迟到回报，避免清空列表
+    if (!marketBatchActive && marketBatchStartRequestID == 0) {
+        if (marketRespLogCount < 10) {
+            char msg[256];
+            SafeFormat(msg, sizeof(msg), "忽略迟到行情回报 req=%d", nRequestID);
+            LogMessage(msg);
+            marketRespLogCount++;
+        }
+        return;
+    }
     static int row = 0;
     int maxRecords = GetQueryMaxRecords();
     static int lastRequestID = 0;
@@ -1300,6 +1449,14 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
             headers.push_back("涨停带");
             headers.push_back("跌停带");
             ResetMarketExport(headers);
+            // 行情查询：流式写入文件（所有返回写入）
+            if (!marketStreamFile) {
+                char path[260];
+                marketStreamFile = OpenCsvStreamUtf8(userID, "行情", path, sizeof(path));
+                if (marketStreamFile) {
+                    WriteCsvHeader(marketStreamFile, headers);
+                }
+            }
         }
         lastRequestID = nRequestID;
     }
@@ -1502,6 +1659,16 @@ void TraderSpi::OnRspQryDepthMarketData(CThostFtdcDepthMarketDataField *pDepthMa
             marketTradingDay = today;
         }
         marketRows.push_back(rowData);
+        if (marketStreamFile) {
+            int maxRows = GetQueryMaxRecords();
+            if (maxRows < 1) maxRows = 1;
+            if (marketRows.size() > (size_t)maxRows) {
+                marketRows.erase(marketRows.begin());
+            }
+        }
+        if (marketStreamFile) {
+            WriteCsvRow(marketStreamFile, rowData);
+        }
         row++;
     }
     if (bIsLast) {
@@ -1725,11 +1892,38 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
         headers.push_back("组合类型");
         headers.push_back("标的合约");
         ResetInstrumentExport(headers);
+        // 合约/期权查询：流式写入文件（所有返回写入）
+        if (instrumentStreamFile) {
+            fclose(instrumentStreamFile);
+            instrumentStreamFile = NULL;
+        }
+        {
+            char path[260];
+            const char* contentName = isOptionQuery ? "期权" : "合约";
+            instrumentStreamFile = OpenCsvStreamUtf8(userID, contentName, path, sizeof(path));
+            if (instrumentStreamFile) {
+                WriteCsvHeader(instrumentStreamFile, headers);
+                instrumentStreamRows = 0;
+            }
+        }
     }
     
     if (pInstrument) {
         totalCount++;
-        
+
+        // 转换合约名称从 GBK 到 UTF-8（用于导出和展示）
+        char* utf8Name = GbkToUtf8(pInstrument->InstrumentName);
+        const char* nameUtf8 = utf8Name ? utf8Name : pInstrument->InstrumentName;
+
+        // 合约/期权：流式写入时写入全部返回数据
+        if (instrumentStreamFile) {
+            WriteInstrumentRow(instrumentStreamFile, pInstrument, nameUtf8);
+            instrumentStreamRows++;
+            if ((instrumentStreamRows % 2000) == 0) {
+                fflush(instrumentStreamFile);
+            }
+        }
+
         bool accept = false;
         if (isOptionQuery) {
             // 期权：不过滤主力，产品类型为期权或现货期权都收
@@ -1752,17 +1946,13 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
         }
 
         if (accept) {
-            // 保存到数组
+            // 保存到数组（用于界面展示）
             strcpy(instruments[instrumentCount].instrumentID, pInstrument->InstrumentID);
-            
-            // 转换合约名称从 GBK 到 UTF-8
-            char* utf8Name = GbkToUtf8(pInstrument->InstrumentName);
-            if (utf8Name) {
-                strncpy(instruments[instrumentCount].instrumentName, utf8Name, 60);
+            if (nameUtf8) {
+                strncpy(instruments[instrumentCount].instrumentName, nameUtf8, 60);
                 instruments[instrumentCount].instrumentName[60] = '\0';
-                delete[] utf8Name;
             } else {
-                strcpy(instruments[instrumentCount].instrumentName, pInstrument->InstrumentName);
+                instruments[instrumentCount].instrumentName[0] = '\0';
             }
             
             strcpy(instruments[instrumentCount].exchangeID, pInstrument->ExchangeID);
@@ -1796,6 +1986,8 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
             instruments[instrumentCount].combinationType = pInstrument->CombinationType;
             instrumentCount++;
         }
+
+        if (utf8Name) delete[] utf8Name;
     }
     
     if (bIsLast && instruments) {
@@ -1813,107 +2005,137 @@ void TraderSpi::OnRspQryInstrument(CThostFtdcInstrumentField *pInstrument, CThos
         // 显示前MAX_DISPLAY条
         int maxDisplay = maxRecords < MAX_INSTRUMENTS ? maxRecords : MAX_INSTRUMENTS;
         int displayCount = instrumentCount < maxDisplay ? instrumentCount : maxDisplay;
+        int maxRows = GetQueryMaxRecords();
+        if (maxRows < 1) maxRows = 1;
+        int startIndex = displayCount > maxRows ? (displayCount - maxRows) : 0;
+        int uiRow = 0;
         for (int i = 0; i < displayCount; i++) {
             char buf[256];
             int col = 0;
             std::vector<std::string> rowData;
-            AddItem(i, col++, instruments[i].instrumentID);
+            if (i >= startIndex) AddItem(uiRow, col++, instruments[i].instrumentID);
             rowData.push_back(instruments[i].instrumentID);
-            AddItem(i, col++, instruments[i].instrumentName);
+            if (i >= startIndex) AddItem(uiRow, col++, instruments[i].instrumentName);
             rowData.push_back(instruments[i].instrumentName);
-            AddItem(i, col++, instruments[i].exchangeID);
+            if (i >= startIndex) AddItem(uiRow, col++, instruments[i].exchangeID);
             rowData.push_back(instruments[i].exchangeID);
-            AddItem(i, col++, instruments[i].exchangeInstID);
+            if (i >= startIndex) AddItem(uiRow, col++, instruments[i].exchangeInstID);
             rowData.push_back(instruments[i].exchangeInstID);
-            AddItem(i, col++, instruments[i].productID);
+            if (i >= startIndex) AddItem(uiRow, col++, instruments[i].productID);
             rowData.push_back(instruments[i].productID);
             FormatChar(buf, instruments[i].productClass);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatInt64(buf, instruments[i].deliveryYear);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatInt64(buf, instruments[i].deliveryMonth);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatInt64(buf, instruments[i].maxMarketOrderVolume);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatInt64(buf, instruments[i].minMarketOrderVolume);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatInt64(buf, instruments[i].maxLimitOrderVolume);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatInt64(buf, instruments[i].minLimitOrderVolume);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             SafeFormat(buf, sizeof(buf), "%d", instruments[i].volumeMultiple);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             SafeFormat(buf, sizeof(buf), "%.4f", instruments[i].priceTick);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
-            AddItem(i, col++, instruments[i].createDate);
+            if (i >= startIndex) AddItem(uiRow, col++, instruments[i].createDate);
             rowData.push_back(instruments[i].createDate);
-            AddItem(i, col++, instruments[i].openDate);
+            if (i >= startIndex) AddItem(uiRow, col++, instruments[i].openDate);
             rowData.push_back(instruments[i].openDate);
-            AddItem(i, col++, instruments[i].expireDate);
+            if (i >= startIndex) AddItem(uiRow, col++, instruments[i].expireDate);
             rowData.push_back(instruments[i].expireDate);
-            AddItem(i, col++, instruments[i].startDelivDate);
+            if (i >= startIndex) AddItem(uiRow, col++, instruments[i].startDelivDate);
             rowData.push_back(instruments[i].startDelivDate);
-            AddItem(i, col++, instruments[i].endDelivDate);
+            if (i >= startIndex) AddItem(uiRow, col++, instruments[i].endDelivDate);
             rowData.push_back(instruments[i].endDelivDate);
             FormatChar(buf, instruments[i].instLifePhase);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatChar(buf, instruments[i].isTrading);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatChar(buf, instruments[i].positionType);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatChar(buf, instruments[i].positionDateType);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatDouble(buf, instruments[i].longMarginRatio, 6);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatDouble(buf, instruments[i].shortMarginRatio, 6);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatChar(buf, instruments[i].maxMarginSideAlgorithm);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatDouble(buf, instruments[i].strikePrice, 2);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatChar(buf, instruments[i].optionsType);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatDouble(buf, instruments[i].underlyingMultiple, 2);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
             FormatChar(buf, instruments[i].combinationType);
-            AddItem(i, col++, buf);
+            if (i >= startIndex) AddItem(uiRow, col++, buf);
             rowData.push_back(buf);
-            AddItem(i, col++, instruments[i].underlyingInstrID);
+            if (i >= startIndex) AddItem(uiRow, col++, instruments[i].underlyingInstrID);
             rowData.push_back(instruments[i].underlyingInstrID);
-            
-            instrumentRows.push_back(rowData);
+
+            if (instrumentStreamFile) {
+                if (i >= startIndex) {
+                    instrumentRows.push_back(rowData);
+                    if (instrumentRows.size() > (size_t)maxRows) {
+                        instrumentRows.erase(instrumentRows.begin());
+                    }
+                    uiRow++;
+                }
+            } else {
+                instrumentRows.push_back(rowData);
+                if (i >= startIndex) {
+                    uiRow++;
+                }
+            }
         }
         
         // 显示统计信息
         char msg[256];
+        int shown = displayCount > maxRows ? maxRows : displayCount;
         if (isOptionQuery) {
             SafeFormat(msg, sizeof(msg), "期权查询完成，总合约数: %d，已显示: %d（按到期日排序）",
-                    totalCount, displayCount);
+                    totalCount, shown);
         } else {
             SafeFormat(msg, sizeof(msg), "主力合约查询完成，总合约数: %d，主力合约: %d，已显示: %d（按到期日排序）",
-                    totalCount, instrumentCount, displayCount);
+                    totalCount, instrumentCount, shown);
         }
         UpdateStatus(msg);
-        ExportInstrumentIfReady(isOptionQuery);
+        if (instrumentStreamFile) {
+            fclose(instrumentStreamFile);
+            instrumentStreamFile = NULL;
+            if (instrumentStreamRows > 0) {
+                char msgStream[256];
+                SafeFormat(msgStream, sizeof(msgStream), "合约/期权导出写入行数: %d", instrumentStreamRows);
+                LogMessage(msgStream);
+            }
+        } else {
+            ExportInstrumentIfReady(isOptionQuery);
+        }
+        // 仅保留配置条数显示（默认 200）
+        TrimListViewToMax(maxRows);
         EndQuery(4);
         
         // 清理内存

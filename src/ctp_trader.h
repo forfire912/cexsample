@@ -12,7 +12,8 @@
 typedef enum ListViewOpType {
     LV_OP_CLEAR = 1,
     LV_OP_ADD_COLUMN = 2,
-    LV_OP_ADD_ITEM = 3
+    LV_OP_ADD_ITEM = 3,
+    LV_OP_TRIM_TO_MAX = 4
 } ListViewOpType;
 
 typedef struct ListViewOp {
@@ -66,7 +67,7 @@ void SetStatusCallback(CTPTrader* trader, StatusCallback callback);
 // 写入调试日志
 void LogMessage(const char* msg);
 
-// 设置每个查询最多输出的记录数（默认100，最大10000）
+// 设置每个查询最多输出的记录数（默认200，最大10000）
 void SetQueryMaxRecords(int maxRecords);
 
 // ????????????????? 

@@ -22,6 +22,8 @@ if (Test-Path $vswhere) {
             if (-not (Test-Path "obj")) { New-Item -ItemType Directory -Path "obj" -Force | Out-Null }
             if (-not (Test-Path "bin")) { New-Item -ItemType Directory -Path "bin" -Force | Out-Null }
             if (Test-Path "bin\CTP_Trader.exe") { Remove-Item "bin\CTP_Trader.exe" -Force }
+            if (Test-Path "ctp_debug.log") { Remove-Item "ctp_debug.log" -Force }
+            if (Test-Path "bin\ctp_debug.log") { Remove-Item "bin\ctp_debug.log" -Force }
             
             # Compile ctp_trader.cpp
             Write-Host "[2/4] Compiling ctp_trader.cpp..." -ForegroundColor Yellow

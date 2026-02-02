@@ -516,14 +516,21 @@ static BOOL ImportInstrumentsFromExcel(HWND owner) {
 static BOOL TryGetListViewPrice(const WCHAR* instrument, double* outPrice) {
     if (!g_hListViewQuery || !instrument || !outPrice) return FALSE;
     // ListView 列索引：合约列/价格列（按列名优先匹配）
-    int instCol = FindListViewColumn(g_hListViewQuery, L"合约");
+    int instCol = FindListViewColumn(g_hListViewQuery, L"查询合约");
+    if (instCol < 0) instCol = FindListViewColumn(g_hListViewQuery, L"合约");
     if (instCol < 0) instCol = FindListViewColumn(g_hListViewQuery, L"合约代码");
-    if (instCol < 0) instCol = FindListViewColumn(g_hListViewQuery, L"查询合约");
-    if (instCol < 0) instCol = 1;
+    if (instCol < 0) {
+        // 查询页通常有“交易日”列，订阅页则以“合约”为第0列
+        int hasTradingDay = FindListViewColumn(g_hListViewQuery, L"交易日");
+        instCol = (hasTradingDay >= 0) ? 2 : 0;
+    }
 
     int priceCol = FindListViewColumn(g_hListViewQuery, L"最新价");
     if (priceCol < 0) priceCol = FindListViewColumn(g_hListViewQuery, L"最新");
-    if (priceCol < 0) priceCol = 8;
+    if (priceCol < 0) {
+        int hasTradingDay = FindListViewColumn(g_hListViewQuery, L"交易日");
+        priceCol = (hasTradingDay >= 0) ? 6 : 1;
+    }
     WCHAR want[64] = {0};
     wcsncpy(want, instrument, _countof(want) - 1);
     want[_countof(want) - 1] = 0;
@@ -565,17 +572,37 @@ static BOOL TryGetListViewPrice(const WCHAR* instrument, double* outPrice) {
 
         // 双向子串匹配，兼容前后缀差异
         if (wcsstr(instNorm, wantNorm) != NULL || wcsstr(wantNorm, instNorm) != NULL) {
-            WCHAR priceBuf[64] = {0};
-            ListView_GetItemText(g_hListViewQuery, i, priceCol, priceBuf, _countof(priceBuf));
-            TrimInPlaceW(priceBuf);
-            if (wcscmp(priceBuf, L"--") == 0) return FALSE;
-            if (priceBuf[0] == 0) return FALSE;
-            WCHAR* endPtr = NULL;
-            // 解析价格字符串为 double
-            double v = wcstod(priceBuf, &endPtr);
-            if (endPtr == priceBuf) return FALSE;
-            *outPrice = v;
-            return TRUE;
+            int colsToTry[6];
+            int colCount = 0;
+            colsToTry[colCount++] = priceCol;
+            // 若最新价不可用，尝试常见替代列（按优先级）
+            int alt = FindListViewColumn(g_hListViewQuery, L"结算");
+            if (alt >= 0) colsToTry[colCount++] = alt;
+            alt = FindListViewColumn(g_hListViewQuery, L"昨结算");
+            if (alt >= 0) colsToTry[colCount++] = alt;
+            alt = FindListViewColumn(g_hListViewQuery, L"收盘");
+            if (alt >= 0) colsToTry[colCount++] = alt;
+            alt = FindListViewColumn(g_hListViewQuery, L"昨收");
+            if (alt >= 0) colsToTry[colCount++] = alt;
+            alt = FindListViewColumn(g_hListViewQuery, L"开盘");
+            if (alt >= 0) colsToTry[colCount++] = alt;
+
+            for (int c = 0; c < colCount; c++) {
+                int col = colsToTry[c];
+                if (col < 0) continue;
+                WCHAR priceBuf[64] = {0};
+                ListView_GetItemText(g_hListViewQuery, i, col, priceBuf, _countof(priceBuf));
+                TrimInPlaceW(priceBuf);
+                if (priceBuf[0] == 0) continue;
+                if (wcscmp(priceBuf, L"--") == 0) continue;
+                WCHAR* endPtr = NULL;
+                // 解析价格字符串为 double
+                double v = wcstod(priceBuf, &endPtr);
+                if (endPtr == priceBuf) continue;
+                *outPrice = v;
+                return TRUE;
+            }
+            return FALSE;
         }
     }
     return FALSE;
@@ -649,6 +676,20 @@ static int FindListViewColumn(HWND hListView, const WCHAR* name) {
         c.cchTextMax = _countof(text);
         if (SendMessage(hListView, LVM_GETCOLUMNW, i, (LPARAM)&c)) {
             if (wcscmp(text, name) == 0) return i;
+        }
+    }
+    // Fallback: trim and allow partial match (handles hidden spaces / variant labels)
+    for (int i = 0; i < colCount; i++) {
+        WCHAR text[64] = {0};
+        LVCOLUMNW c = {0};
+        c.mask = LVCF_TEXT;
+        c.pszText = text;
+        c.cchTextMax = _countof(text);
+        if (SendMessage(hListView, LVM_GETCOLUMNW, i, (LPARAM)&c)) {
+            TrimInPlaceW(text);
+            if (!text[0]) continue;
+            if (wcscmp(text, name) == 0) return i;
+            if (wcsstr(text, name) != NULL || wcsstr(name, text) != NULL) return i;
         }
     }
     return -1;
@@ -1086,7 +1127,7 @@ static void SetInstrumentTextBoth(const WCHAR* text) {
 
 static BOOL BlockIfQueryInFlight(void) {
     if (g_queryInFlight) {
-        UpdateStatus("上一条查询未返回，请稍后再试");
+        UpdateStatus("正在进行查询，请稍后再试");
         return TRUE;
     }
     return FALSE;
@@ -1151,9 +1192,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             // 处理 ListView 点击：选中合约后自动填充输入框
             if (pnmhdr->idFrom == IDC_LISTVIEW_QUERY) {
                 if (pnmhdr->code == LVN_INSERTITEM) {
-                    g_queryInFlight = FALSE;
-                    g_queryInFlightType = 0;
-                    KillTimer(g_hMainWnd, IDT_QUERY_TIMEOUT);
+                    // 行情批量查询会持续插入行，不能在首行就结束定时器
+                    if (g_queryInFlightType != 3) {
+                        g_queryInFlight = FALSE;
+                        g_queryInFlightType = 0;
+                        KillTimer(g_hMainWnd, IDT_QUERY_TIMEOUT);
+                    }
                     return 0;
                 }
                 if (pnmhdr->code == LVN_ITEMCHANGED) {
@@ -1656,6 +1700,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     }
                     break;
                 }
+                case LV_OP_TRIM_TO_MAX: {
+                    int maxRows = op->row;
+                    if (maxRows < 0) maxRows = 0;
+                    int count = ListView_GetItemCount(op->hListView);
+                    while (count > maxRows) {
+                        ListView_DeleteItem(op->hListView, 0);
+                        count--;
+                    }
+                    break;
+                }
                 default:
                     break;
             }
@@ -1668,7 +1722,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             // 行情更新消息：刷新/新增 ListView 行
             MdUpdate* u = (MdUpdate*)lParam;
             if (!u) return 0;
-            g_queryInFlight = FALSE;
             // ListView 不可用则丢弃行情
             if (!g_hListViewQuery || !IsWindow(g_hListViewQuery)) {
                 free(u);
@@ -1779,7 +1832,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         SetTimer(g_hMainWnd, IDT_QUERY_TIMEOUT, 500, NULL);
                         return 0;
                     }
-                    UpdateStatus("上一条查询未返回，请稍后再试");
+                    UpdateStatus("正在进行查询，请稍后再试");
                     g_queryInFlight = FALSE;
                     g_queryInFlightType = 0;
                 }
