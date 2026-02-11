@@ -176,8 +176,9 @@ CTPTrader* g_pTraderProd = NULL;
 ULONGLONG g_lastConnectAttemptProd = 0;
 ULONGLONG g_loginPollStartProd = 0;
 
+#define APP_ID_DEFAULT "client_long_1.0.0"
 // CTP AppID（登录认证使用）
-const char* APP_ID = "client_long_1.0.0";
+static char g_appId[64] = APP_ID_DEFAULT;
 
 void CreateMainWindow(HWND hWnd, HINSTANCE hInstance);
 void CreateQueryPanel(HWND hParent, HINSTANCE hInstance);
@@ -238,6 +239,14 @@ static void LoadConfigFromIni(void) {
 
     GetPrivateProfileStringW(L"Front", L"AuthCode", L"", buf, _countof(buf), path);
     if (buf[0] && g_hEditAuthCode) SetWindowTextW(g_hEditAuthCode, buf);
+
+    GetPrivateProfileStringW(L"Front", L"AppID", L"", buf, _countof(buf), path);
+    if (buf[0]) {
+        int n = WideCharToMultiByte(CP_ACP, 0, buf, -1, g_appId, (int)_countof(g_appId), NULL, NULL);
+        if (n == 0) {
+            strncpy_s(g_appId, _countof(g_appId), APP_ID_DEFAULT, _TRUNCATE);
+        }
+    }
 
     GetPrivateProfileStringW(L"Front", L"BrokerID", L"", buf, _countof(buf), path);
     if (buf[0] && g_hEditBrokerID) SetWindowTextW(g_hEditBrokerID, buf);
@@ -858,9 +867,10 @@ void CreateMainWindow(HWND hWnd, HINSTANCE hInstance) {
 
     CreateWindow(TEXT("STATIC"), TEXT("认证码:"), WS_VISIBLE | WS_CHILD,
                  670, y, 60, 24, hWnd, NULL, hInstance, NULL);
+    int authCodeWidth = 150 + (LOWORD(GetDialogBaseUnits()) * 10);
     g_hEditAuthCode = CreateWindow(TEXT("EDIT"), TEXT("AM8P99PA7UPUXREW"),
                  WS_VISIBLE | WS_CHILD | WS_BORDER,
-                 730, y, 150, 24, hWnd, (HMENU)IDC_EDIT_AUTHCODE, hInstance, NULL);
+                 730, y, authCodeWidth, 24, hWnd, (HMENU)IDC_EDIT_AUTHCODE, hInstance, NULL);
 
     // Row 2: 经纪商/用户/密码/连接按钮（正式环境默认值）
     y += 35;
@@ -1385,7 +1395,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     UpdateStatus("正在连接(正式)...");
                     if (trader) {
                         Disconnect(trader);
-                        ConnectAndLogin(trader, brokerID, userID, password, frontAddr, authCode, APP_ID);
+                        ConnectAndLogin(trader, brokerID, userID, password, frontAddr, authCode, g_appId);
                         g_lastConnectAttemptProd = now;
                         StartLoginPollTimer(TRUE);
                     } else {
